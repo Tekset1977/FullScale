@@ -48,8 +48,7 @@ def initialize_system():
     AUGER_MOTOR = motor_driver.get_channel(1)
     LEG_MOTOR_1 = motor_driver.get_channel(2)
     LEG_MOTOR_2 = motor_driver.get_channel(3)
-    LEG_MOTOR_3 = motor_driver.get_channel(4)
-    PUMP_MOTOR = motor_driver.get_channel(5)
+    PUMP_MOTOR = motor_driver.get_channel(4)
     
     # Initialize soil sensors
     stemma_sensor.begin()
@@ -180,13 +179,11 @@ def main():
             # Deploy all stabilization legs
             LEG_MOTOR_1.set_speed(200)
             LEG_MOTOR_2.set_speed(200)
-            LEG_MOTOR_3.set_speed(200)
             
             delay(3000)  # Deploy for 3 seconds
             
             LEG_MOTOR_1.set_speed(0)
             LEG_MOTOR_2.set_speed(0)
-            LEG_MOTOR_3.set_speed(0)
             
             delay(500)
             
@@ -234,7 +231,26 @@ def main():
             AUGER_MOTOR.set_speed(180)
             delay(3000)  # Spin for 3 seconds
             
-            STATE = "MEASURE_SOIL"
+           
+            
+            STATE = "AUGER_RETRACT_UPWARD"
+        
+        # ======== STATE: AUGER_RETRACT_UPWARD ========
+        elif STATE == "AUGER_RETRACT_UPWARD":
+            # Stop spinning and retract auger
+            AUGER_MOTOR.set_speed(-180)  # Reverse to retract
+            delay(5000)  # Retract for 5 seconds
+            AUGER_MOTOR.set_speed(0)  # Stop
+                      SOIL_SAMPLE_COUNT += 1 
+            # Check if we need more samples
+            if SOIL_SAMPLE_COUNT < MAX_SOIL_SAMPLES:
+                STATE = "AUGER_DEPLOY_DOWNWARD"  # Repeat for next sample
+            else:
+                STATE = "MEASURE_SOIL"
+        
+        
+
+ STATE = "MEASURE_SOIL"
         
         # ======== STATE: MEASURE_SOIL ========
         elif STATE == "MEASURE_SOIL":
@@ -253,30 +269,14 @@ def main():
             log_data("STEMMA Moisture: " + str(stemma_data.moisture))
             log_data("STEMMA EC: " + str(stemma_data.conductivity))
             
-            SOIL_SAMPLE_COUNT += 1
-            
-            STATE = "AUGER_RETRACT_UPWARD"
-        
-        # ======== STATE: AUGER_RETRACT_UPWARD ========
-        elif STATE == "AUGER_RETRACT_UPWARD":
-            # Stop spinning and retract auger
-            AUGER_MOTOR.set_speed(-180)  # Reverse to retract
-            delay(5000)  # Retract for 5 seconds
-            AUGER_MOTOR.set_speed(0)  # Stop
-            
-            # Check if we need more samples
-            if SOIL_SAMPLE_COUNT < MAX_SOIL_SAMPLES:
-                STATE = "AUGER_DEPLOY_DOWNWARD"  # Repeat for next sample
-            else:
-                STATE = "ACTIVATE_PUMP"
-        
+            STATE = "ACTIVATE_PUMP"
+
         # ======== STATE: ACTIVATE_PUMP ========
         elif STATE == "ACTIVATE_PUMP":
             # Activate peristaltic pump
             PUMP_MOTOR.set_speed(150)
             delay(10000)  # Run pump for 10 seconds
             PUMP_MOTOR.set_speed(0)
-            
             STATE = "MISSION_COMPLETE"
         
         # ======== STATE: MISSION_COMPLETE ========
