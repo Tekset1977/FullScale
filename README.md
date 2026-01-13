@@ -1,3 +1,3 @@
 # FullScale
 Fullscale code and relevant development tidbits 
-      [State Machine (1).pdf](https://github.com/user-attachments/files/24600507/State.Machine.1.pdf)
+      [View PDF](https://github.com/user-attachments/files/24600507/State.Machine.1.pdf)
