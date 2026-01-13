@@ -1,0 +1,316 @@
+"""
+ESP32 State Machine Pseudocode for Payload Deployment System
+Hardware:
+- ESP32 microcontroller
+- MPL3115A2 (Altimeter/Barometric sensor)
+- ICM-20948 (9-axis IMU - accelerometer, gyroscope, magnetometer)
+- DC Motor Driver Carrier (for auger, legs, parachute deployment)
+"""
+
+# ============ GLOBAL VARIABLES ============
+STATE = "INITIALIZE"
+GROUND_LEVEL_ALT = 0
+APOGEE_ALTITUDE = 0
+CURRENT_ALTITUDE = 0
+DEPLOYMENT_THRESHOLD_HIGH = 600  # feet
+DEPLOYMENT_THRESHOLD_LOW = 400   # feet
+ANGLE_THRESHOLD = 60  # degrees
+SOIL_SAMPLE_COUNT = 0
+MAX_SOIL_SAMPLES = 3
+
+# ============ HARDWARE INITIALIZATION ============
+def initialize_system():
+    """Initialize all sensors and actuators"""
+    
+    # Initialize ESP32 peripherals
+    init_i2c_bus()
+    init_pwm_for_motors()
+    
+    # Initialize MPL3115A2 altimeter
+    mpl3115a2.begin()
+    mpl3115a2.set_mode(BAROMETER)
+    mpl3115a2.set_oversample_rate(128)
+    mpl3115a2.enable_event_flags()
+    GROUND_LEVEL_ALT = mpl3115a2.read_altitude()
+    
+    # Initialize ICM-20948 IMU
+    icm20948.begin()
+    icm20948.set_accel_range(16G)
+    icm20948.set_gyro_range(2000_DPS)
+    icm20948.calibrate()
+    
+    # Initialize DC Motor Driver
+    motor_driver.begin()
+    motor_driver.set_frequency(1000)  # 1kHz PWM
+    
+    # Initialize motor channels
+    PARACHUTE_MOTOR = motor_driver.get_channel(0)
+    AUGER_MOTOR = motor_driver.get_channel(1)
+    LEG_MOTOR_1 = motor_driver.get_channel(2)
+    LEG_MOTOR_2 = motor_driver.get_channel(3)
+    LEG_MOTOR_3 = motor_driver.get_channel(4)
+    PUMP_MOTOR = motor_driver.get_channel(5)
+    
+    # Initialize soil sensors
+    stemma_sensor.begin()
+    primary_soil_sensor.begin()
+    
+    return SUCCESS
+
+
+# ============ MAIN STATE MACHINE ============
+def main():
+    """Main program loop"""
+    
+    STATE = "INITIALIZE"
+    
+    while True:
+        
+        # ======== STATE: INITIALIZE ========
+        if STATE == "INITIALIZE":
+            if initialize_system() == SUCCESS:
+                STATE = "LIGHT_SLEEP"
+        
+        # ======== STATE: LIGHT_SLEEP ========
+        elif STATE == "LIGHT_SLEEP":
+            # Configure wake-up timer for 5 seconds
+            esp32.configure_wakeup_timer(5000)  # 5000ms
+            
+            # Enter light sleep mode
+            esp32.light_sleep()
+            
+            # Wake up after 5s
+            STATE = "CHECK_MOVEMENT"
+        
+        # ======== STATE: CHECK_MOVEMENT ========
+        elif STATE == "CHECK_MOVEMENT":
+            # Read IMU data
+            accel_data = icm20948.read_accelerometer()
+            gyro_data = icm20948.read_gyroscope()
+            
+            # Calculate total acceleration magnitude
+            accel_magnitude = sqrt(accel_data.x^2 + accel_data.y^2 + accel_data.z^2)
+            gyro_magnitude = sqrt(gyro_data.x^2 + gyro_data.y^2 + gyro_data.z^2)
+            
+            # Check for significant movement
+            MOVEMENT_ACCEL_THRESHOLD = 2.0  # G's
+            MOVEMENT_GYRO_THRESHOLD = 50.0  # deg/s
+            
+            if accel_magnitude > MOVEMENT_ACCEL_THRESHOLD or gyro_magnitude > MOVEMENT_GYRO_THRESHOLD:
+                # Movement detected - launch event!
+                STATE = "REINITIALIZE_SENSORS"
+            else:
+                # No significant movement, go back to sleep
+                STATE = "LIGHT_SLEEP"
+        
+        # ======== STATE: REINITIALIZE_SENSORS ========
+        elif STATE == "REINITIALIZE_SENSORS":
+            # Wake up fully and reinitialize sensors for active monitoring
+            icm20948.set_sample_rate_high()
+            mpl3115a2.set_sample_rate_high()
+            
+            STATE = "MONITOR_TO_APOGEE"
+        
+        # ======== STATE: MONITOR_TO_APOGEE ========
+        elif STATE == "MONITOR_TO_APOGEE":
+            # Continuously monitor altitude
+            CURRENT_ALTITUDE = mpl3115a2.read_altitude() - GROUND_LEVEL_ALT
+            
+            # Update apogee if current altitude is higher
+            if CURRENT_ALTITUDE > APOGEE_ALTITUDE:
+                APOGEE_ALTITUDE = CURRENT_ALTITUDE
+            
+            # Check if we've reached apogee (altitude starts decreasing)
+            # Use a small threshold to avoid noise
+            if CURRENT_ALTITUDE < (APOGEE_ALTITUDE - 10):  # 10 ft buffer
+                STATE = "WATCH_DEPLOYMENT_ALTITUDE"
+            
+            delay(50)  # 50ms sampling rate
+        
+        # ======== STATE: WATCH_DEPLOYMENT_ALTITUDE ========
+        elif STATE == "WATCH_DEPLOYMENT_ALTITUDE":
+            # Monitor altitude until deployment threshold
+            CURRENT_ALTITUDE = mpl3115a2.read_altitude() - GROUND_LEVEL_ALT
+            
+            # Check if within deployment range (400-600 ft)
+            if CURRENT_ALTITUDE <= DEPLOYMENT_THRESHOLD_HIGH and CURRENT_ALTITUDE >= DEPLOYMENT_THRESHOLD_LOW:
+                STATE = "DEPLOY_PARACHUTE"
+            
+            delay(50)  # 50ms sampling rate
+        
+        # ======== STATE: DEPLOY_PARACHUTE ========
+        elif STATE == "DEPLOY_PARACHUTE":
+            # Activate parachute deployment motor
+            PARACHUTE_MOTOR.set_speed(255)  # Full speed
+            delay(2000)  # Run for 2 seconds
+            PARACHUTE_MOTOR.set_speed(0)
+            
+            STATE = "WAIT_FOR_GROUND"
+        
+        # ======== STATE: WAIT_FOR_GROUND ========
+        elif STATE == "WAIT_FOR_GROUND":
+            # Monitor altitude until ground level
+            CURRENT_ALTITUDE = mpl3115a2.read_altitude() - GROUND_LEVEL_ALT
+            
+            # Check if at ground level (within 5 ft tolerance)
+            if CURRENT_ALTITUDE <= 5:
+                STATE = "CHECK_ANGLE"
+            
+            delay(100)  # 100ms sampling rate
+        
+        # ======== STATE: CHECK_ANGLE ========
+        elif STATE == "CHECK_ANGLE":
+            # Get orientation from IMU
+            accel_data = icm20948.read_accelerometer()
+            
+            # Calculate angle from vertical (using gravity vector)
+            # Assuming Z-axis is vertical when upright
+            angle_from_vertical = calculate_angle_from_vertical(accel_data)
+            
+            if angle_from_vertical <= ANGLE_THRESHOLD:
+                # Within acceptable angle - proceed to stabilization
+                STATE = "DEPLOY_STABILIZATION_LEGS"
+            else:
+                # Not within acceptable angle - wait for gravity to correct
+                delay(1000)  # Wait 1 second
+                STATE = "CHECK_ANGLE"  # Check again
+        
+        # ======== STATE: DEPLOY_STABILIZATION_LEGS ========
+        elif STATE == "DEPLOY_STABILIZATION_LEGS":
+            # Deploy all stabilization legs
+            LEG_MOTOR_1.set_speed(200)
+            LEG_MOTOR_2.set_speed(200)
+            LEG_MOTOR_3.set_speed(200)
+            
+            delay(3000)  # Deploy for 3 seconds
+            
+            LEG_MOTOR_1.set_speed(0)
+            LEG_MOTOR_2.set_speed(0)
+            LEG_MOTOR_3.set_speed(0)
+            
+            delay(500)
+            
+            # Re-check angle after leg deployment
+            accel_data = icm20948.read_accelerometer()
+            angle_from_vertical = calculate_angle_from_vertical(accel_data)
+            
+            if angle_from_vertical <= ANGLE_THRESHOLD:
+                STATE = "AUGER_DEPLOY_DOWNWARD"
+            else:
+                # Need extra pivot - deploy one leg more
+                STATE = "DEPLOY_EXTRA_LEG"
+        
+        # ======== STATE: DEPLOY_EXTRA_LEG ========
+        elif STATE == "DEPLOY_EXTRA_LEG":
+            # Deploy one leg for extra pivot
+            LEG_MOTOR_1.set_speed(200)
+            delay(1500)
+            LEG_MOTOR_1.set_speed(0)
+            
+            delay(500)
+            
+            # Check angle again
+            accel_data = icm20948.read_accelerometer()
+            angle_from_vertical = calculate_angle_from_vertical(accel_data)
+            
+            if angle_from_vertical <= ANGLE_THRESHOLD:
+                STATE = "AUGER_DEPLOY_DOWNWARD"
+            else:
+                # If still not stable, proceed anyway
+                STATE = "AUGER_DEPLOY_DOWNWARD"
+        
+        # ======== STATE: AUGER_DEPLOY_DOWNWARD ========
+        elif STATE == "AUGER_DEPLOY_DOWNWARD":
+            # Spin auger and move downward to change center of mass
+            AUGER_MOTOR.set_speed(180)  # Spin auger
+            # Assume linear actuator on another channel or same motor with direction control
+            delay(5000)  # Run for 5 seconds to penetrate soil
+            
+            STATE = "AUGER_SPIN_IN_PLACE"
+        
+        # ======== STATE: AUGER_SPIN_IN_PLACE ========
+        elif STATE == "AUGER_SPIN_IN_PLACE":
+            # Continue spinning auger without moving down
+            AUGER_MOTOR.set_speed(180)
+            delay(3000)  # Spin for 3 seconds
+            
+            STATE = "MEASURE_SOIL"
+        
+        # ======== STATE: MEASURE_SOIL ========
+        elif STATE == "MEASURE_SOIL":
+            # Activate soil sensors
+            soil_data = primary_soil_sensor.read_all()
+            
+            # Store soil measurements
+            log_data("Sample " + str(SOIL_SAMPLE_COUNT + 1))
+            log_data("Moisture: " + str(soil_data.moisture))
+            log_data("Temperature: " + str(soil_data.temperature))
+            log_data("pH: " + str(soil_data.ph))
+            log_data("Nutrients: " + str(soil_data.nutrients))
+            
+            # Redundant STEMMA sensor measurement
+            stemma_data = stemma_sensor.read()
+            log_data("STEMMA Moisture: " + str(stemma_data.moisture))
+            log_data("STEMMA EC: " + str(stemma_data.conductivity))
+            
+            SOIL_SAMPLE_COUNT += 1
+            
+            STATE = "AUGER_RETRACT_UPWARD"
+        
+        # ======== STATE: AUGER_RETRACT_UPWARD ========
+        elif STATE == "AUGER_RETRACT_UPWARD":
+            # Stop spinning and retract auger
+            AUGER_MOTOR.set_speed(-180)  # Reverse to retract
+            delay(5000)  # Retract for 5 seconds
+            AUGER_MOTOR.set_speed(0)  # Stop
+            
+            # Check if we need more samples
+            if SOIL_SAMPLE_COUNT < MAX_SOIL_SAMPLES:
+                STATE = "AUGER_DEPLOY_DOWNWARD"  # Repeat for next sample
+            else:
+                STATE = "ACTIVATE_PUMP"
+        
+        # ======== STATE: ACTIVATE_PUMP ========
+        elif STATE == "ACTIVATE_PUMP":
+            # Activate peristaltic pump
+            PUMP_MOTOR.set_speed(150)
+            delay(10000)  # Run pump for 10 seconds
+            PUMP_MOTOR.set_speed(0)
+            
+            STATE = "MISSION_COMPLETE"
+        
+        # ======== STATE: MISSION_COMPLETE ========
+        elif STATE == "MISSION_COMPLETE":
+            # Mission complete - enter low power mode
+            log_data("Mission Complete!")
+            
+            # Turn off all motors
+            PARACHUTE_MOTOR.set_speed(0)
+            AUGER_MOTOR.set_speed(0)
+            LEG_MOTOR_1.set_speed(0)
+            LEG_MOTOR_2.set_speed(0)
+            LEG_MOTOR_3.set_speed(0)
+            PUMP_MOTOR.set_speed(0)
+            
+            # Enter deep sleep
+            esp32.deep_sleep()
+
+
+# ============ HELPER FUNCTIONS ============
+def calculate_angle_from_vertical(accel_data):
+    """Calculate angle from vertical using accelerometer data"""
+    # Assuming Z-axis points up when vertical
+    # angle = arccos(Z / |accel|)
+    magnitude = sqrt(accel_data.x^2 + accel_data.y^2 + accel_data.z^2)
+    angle = acos(accel_data.z / magnitude) * (180 / PI)
+    return angle
+
+
+def log_data(message):
+    """Log data to serial or storage"""
+    serial.println(message)
+    # Could also write to SD card or flash memory
+
+
+# ============ ENTRY POINT ============
+main()
