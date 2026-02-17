@@ -15,7 +15,7 @@
 #define WAKE_PIN  15
 #define MAX_RETRIES 5
 #define FLUSH_INTERVAL_MS 2000
-#define LOOP_DELAY_MS 100
+#define LOOP_DELAY_MS 20
 
 // Sleep configuration
 #define SLEEP_DURATION_SEC 5
@@ -186,6 +186,7 @@ bool initLogFile(void) {
 }
 
 // Rule 4 & 7: Read IMU sensors with validation
+// Rule 4 & 7: Read IMU sensors with validation
 bool readIMUSensors(SensorData* data) {
   // Rule 5: Parameter validation
   if (data == NULL) {
@@ -197,8 +198,9 @@ bool readIMUSensors(SensorData* data) {
     return false;
   }
   
-  // Rule 7: Check return value
-  if (!myICM.getAGMT()) {
+  // Rule 7: Get sensor data and check status
+  myICM.getAGMT();
+  if (myICM.status != ICM_20948_Stat_Ok) {
     return false;
   }
   
