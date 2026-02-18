@@ -1,2 +1,4 @@
 # FullScale
 Fullscale code and relevant development tidbits 
+
+In the fullscaletest.ino is a file from 2/17/2026. I made the updates to be every 35ms. Which is not planned 20ms, but fairly close and I belive would yield usable data. Unfortunately, unlike ModifiedSub.ino it does not look beautiful, since there's a problem with Display and Sleep Mode. If those 2 things are gone, SD card write/flush works fine. I suspect its the I2C clutter and timing misfire, blocking the code from progression. Needs more testing. Debating wether or not to add failsafe to the code to make it run no matter what. Nasa would love it. Barometer was an issue, but I fixed it by writing directly to it and avoiding Adafruit. Otherwise, sample was too slow. Wondering how I got it to work the first time. Perhaps it wasn't even working the first time either and I was too naive and lacking scrutiny to notice. 
