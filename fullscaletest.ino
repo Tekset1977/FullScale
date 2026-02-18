@@ -2,590 +2,650 @@
 #include <SD.h>
 #include <Wire.h>
 #include <ICM_20948.h>
+#include <Adafruit_MPL3115A2.h>
 #include <Adafruit_INA3221.h>
-#include <ModbusMaster.h>
-#include <esp_sleep.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
 
-// ==================== PIN DEFINITIONS ====================
+// Configuration constants
 #define SD_CS     5
 #define SPI_SCK   18
 #define SPI_MISO  19
 #define SPI_MOSI  23
 #define WAKE_PIN  15
+#define MAX_RETRIES 5
+#define FLUSH_INTERVAL_MS 2000
+#define LOOP_DELAY_MS 20
 
-// RS485/Modbus pins
-#define RX2_PIN    16   // MAX485 RO to ESP32 GPIO16
-#define TX2_PIN    17   // MAX485 DI from ESP32 GPIO17
-#define RE_DE_PIN  4    // MAX485 DE & RE tied to ESP32 GPIO4
+// Sleep configuration
+#define SLEEP_DURATION_SEC 5
+#define MOVEMENT_THRESHOLD 0.5f
+#define BARO_SAMPLE_INTERVAL 50
 
-// ==================== CONFIGURATION ====================
-#define ALT_CHANGE_THRESHOLD 1.0    // meters
-#define MOTION_THRESHOLD 0.15       // g's for accelerometer
-#define STABLE_TIME 3000            // ms to wait before taking soil reading
-#define MODBUS_BAUD 4800
-#define SLAVE_ID 1
+// Display configuration
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+#define SCREEN_ADDRESS 0x3C
 
-// ==================== GLOBAL OBJECTS ====================
+// Sensor value ranges for validation
+#define ACCEL_MIN -2000.0f
+#define ACCEL_MAX  2000.0f
+#define GYRO_MIN  -2000.0f
+#define GYRO_MAX   2000.0f
+#define ALT_MIN   -500.0f
+#define ALT_MAX    10000.0f
+#define TEMP_MIN  -50.0f
+#define TEMP_MAX   100.0f
+
+// Error codes
+#define ERROR_NONE 0
+#define ERROR_SD_INIT 1
+#define ERROR_IMU_INIT 2
+#define ERROR_BARO_INIT 3
+#define ERROR_FILE_OPEN 4
+#define ERROR_SENSOR_RANGE 5
+#define ERROR_WRITE_FAILED 6
+#define ERROR_DISPLAY_INIT 7
+
+// Accelerometer calibration
+struct AccelCal {
+  float offset_x;
+  float offset_y;
+  float offset_z;
+  float scale_x;
+  float scale_y;
+  float scale_z;
+} accel_cal = {-40.5f, -5.0f, 16.0f, 1.0f, 1.0f, 1.0f};
+
+// Sensor data structure
+struct SensorData {
+  unsigned long timestamp;
+  float ax, ay, az;
+  float gx, gy, gz;
+  float mx, my, mz;
+  float altitude;
+  float temperature;
+};
+
+// Sleep state tracking
+struct SleepState {
+  float last_ax;
+  float last_ay;
+  float last_az;
+  bool first_read;
+  int stable_count;
+} sleep_state = {0.0f, 0.0f, 0.0f, true, 0};
+
+// Global objects
 SPIClass spi(VSPI);
 ICM_20948_I2C myICM;
-Adafruit_INA3221 ina3221;
-ModbusMaster soilSensor;
+Adafruit_MPL3115A2 baro;
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 File logFile;
 
 bool icm_ok = false;
 bool mpl_ok = false;
-bool ina_ok = false;
-bool modbus_ok = false;
+bool display_ok = false;
+int error_state = ERROR_NONE;
+unsigned long session_start_time = 0;
+unsigned long loop_count = 0;
 
-// Motion detection variables
-float last_altitude = 0;
-unsigned long last_motion_time = 0;
-bool first_reading = true;
-
-// Accelerometer baseline for motion detection
-float baseline_ax = 0, baseline_ay = 0, baseline_az = 0;
-bool baseline_set = false;
-
-// ==================== RS485 DIRECTION CONTROL ====================
-void preTransmission() {
-  digitalWrite(RE_DE_PIN, HIGH);
-  delayMicroseconds(400);
-}
-
-void postTransmission() {
-  delayMicroseconds(400);
-  digitalWrite(RE_DE_PIN, LOW);
-}
-
-// ==================== MPL3115A2 FUNCTIONS ====================
-bool mplReadStatusNonBlocking(uint8_t &status_out) {
-  Wire.beginTransmission(0x60);
-  Wire.write(0x00);
-  uint8_t err = Wire.endTransmission(false);
-  if (err != 0) return false;
-
-  delayMicroseconds(100);
-  
-  int n = Wire.requestFrom(0x60, (uint8_t)1);
-  if (n < 1) return false;
-
-  status_out = Wire.read();
-  return true;
-}
-
-bool mplVerifyWhoAmI() {
-  Wire.beginTransmission(0x60);
-  Wire.write(0x0C);
-  if (Wire.endTransmission(false) != 0) return false;
-  
-  if (Wire.requestFrom(0x60, (uint8_t)1) < 1) return false;
-  
-  uint8_t whoami = Wire.read();
-  Serial.print("[DEBUG] MPL WHO_AM_I: 0x");
-  Serial.println(whoami, HEX);
-  return (whoami == 0xC4);
-}
-
-bool mpl3115_reset_and_init() {
-  Serial.println("[RESET] Starting MPL3115A2 software reset...");
-  
-  if (!mplVerifyWhoAmI()) {
-    Serial.println("[ERROR] MPL3115A2 not responding to WHO_AM_I!");
+// Rule 5: Assertion for recovery
+bool assertRange(float value, float min, float max, int errorCode) {
+  if (value < min || value > max) {
+    error_state = errorCode;
+    Serial.print("Range error: ");
+    Serial.print(value);
+    Serial.print(" not in [");
+    Serial.print(min);
+    Serial.print(", ");
+    Serial.print(max);
+    Serial.println("]");
     return false;
   }
-
-  Wire.setTimeOut(1000);
-  
-  // Enter standby mode
-  Wire.beginTransmission(0x60);
-  Wire.write(0x26);
-  Wire.write(0x00);
-  Wire.endTransmission();
-  delay(20);
-
-  Serial.println("[RESET] MPL3115A2 ready for reconfiguration");
   return true;
 }
 
-void configureMPLInterrupt() {
-  Serial.println("[CONFIG] Configuring MPL3115A2...");
-  
-  Wire.beginTransmission(0x60);
-  Wire.write(0x26);
-  Wire.write(0x00);
-  Wire.endTransmission();
-  delay(20);
-
-  // Calculate sea-level pressure from local conditions
-  float local_pressure_pa = 1016.49 * 100.0; // Convert mbar to Pa
-  float sea_level_pressure_pa = local_pressure_pa * pow(1.0 - (194 / 44330.0), -5.255);
-  float sea_level_pressure_mbar = sea_level_pressure_pa / 100.0;
-  
-  Serial.print("[CONFIG] Calculated sea-level pressure: ");
-  Serial.print(sea_level_pressure_mbar, 2);
-  Serial.println(" mbar");
-  
-  // Set BAR_IN registers
-  uint16_t bar_in = (uint16_t)(sea_level_pressure_pa / 2.0);
-  
-  Wire.beginTransmission(0x60);
-  Wire.write(0x14);
-  Wire.write((bar_in >> 8) & 0xFF);
-  Wire.endTransmission();
-  delay(5);
-  
-  Wire.beginTransmission(0x60);
-  Wire.write(0x15);
-  Wire.write(bar_in & 0xFF);
-  Wire.endTransmission();
-  delay(5);
-
-  Wire.beginTransmission(0x60);
-  Wire.write(0x13);
-  Wire.write(0x07);
-  Wire.endTransmission();
-  delay(5);
-
-  Wire.beginTransmission(0x60);
-  Wire.write(0x29);
-  Wire.write(0x80);
-  Wire.endTransmission();
-  delay(5);
-
-  Wire.beginTransmission(0x60);
-  Wire.write(0x2A);
-  Wire.write(0x80);
-  Wire.endTransmission();
-  delay(5);
-
-  Wire.beginTransmission(0x60);
-  Wire.write(0x26);
-  Wire.write(0xB9);
-  Wire.endTransmission();
-  
-  Serial.println("[CONFIG] Set to ACTIVE altimeter mode (CONTINUOUS)");
-  delay(100);
+// Rule 5: Assertion for file operations
+bool assertFileValid(void) {
+  if (!logFile) {
+    error_state = ERROR_WRITE_FAILED;
+    Serial.println("File not valid!");
+    return false;
+  }
+  return true;
 }
 
-float safeReadAltitude(unsigned long timeout_ms = 2000) {
-  unsigned long start = millis();
-  uint8_t s;
-
-  while (millis() - start < timeout_ms) {
-    if (mplReadStatusNonBlocking(s)) {
-      if (s & 0x08) {
-        Wire.beginTransmission(0x60);
-        Wire.write(0x01);
-        if (Wire.endTransmission(false) == 0) {
-          if (Wire.requestFrom(0x60, (uint8_t)3) >= 3) {
-            uint8_t msb = Wire.read();
-            uint8_t csb = Wire.read();
-            uint8_t lsb = Wire.read();
-            
-            int32_t alt_raw = ((uint32_t)msb << 24) | ((uint32_t)csb << 16) | ((uint32_t)lsb << 8);
-            alt_raw >>= 8;
-            
-            float altitude = (float)alt_raw / 256.0f;
-            return altitude;
-          }
-        }
-      }
+// Rule 2 & 4: Bounded display initialization
+bool initDisplay(void) {
+  Serial.println("Initializing display...");
+  for (int retry = 0; retry < MAX_RETRIES; retry++) {
+    if (display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
+      display.clearDisplay();
+      display.setTextSize(1);
+      display.setTextColor(SSD1306_WHITE);
+      display.setCursor(0, 0);
+      display.println("Display Ready");
+      display.display();
+      Serial.println("Display OK!");
+      return true;
     }
-    delay(10);
+    Serial.print("Display retry ");
+    Serial.println(retry);
+    delay(100);
   }
-
-  Serial.println("[ERROR] safeReadAltitude timeout");
-  return NAN;
+  error_state = ERROR_DISPLAY_INIT;
+  Serial.println("Display FAILED!");
+  return false;
 }
 
-float safeReadTemperature(unsigned long timeout_ms = 800) {
-  unsigned long start = millis();
-  uint8_t s;
-
-  while (millis() - start < timeout_ms) {
-    if (mplReadStatusNonBlocking(s)) {
-      if (s & 0x02) {
-        Wire.beginTransmission(0x60);
-        Wire.write(0x04);
-        if (Wire.endTransmission(false) == 0) {
-          if (Wire.requestFrom(0x60, (uint8_t)2) >= 2) {
-            uint8_t msb = Wire.read();
-            uint8_t lsb = Wire.read();
-            
-            int16_t temp_raw = ((int16_t)msb << 8) | lsb;
-            temp_raw >>= 4;
-            
-            float temperature = (float)temp_raw / 16.0f;
-            return temperature;
-          }
-        }
-      }
+bool initSD(void) {
+  Serial.println("Initializing SD...");
+  for (int retry = 0; retry < MAX_RETRIES; retry++) {
+    if (SD.begin(SD_CS, spi)) {
+      Serial.println("SD OK!");
+      return true;
     }
-    delay(10);
+    Serial.print("SD retry ");
+    Serial.println(retry);
+    delay(100);
   }
-
-  return NAN;
+  error_state = ERROR_SD_INIT;
+  Serial.println("SD FAILED!");
+  return false;
 }
 
-// ==================== SOIL SENSOR FUNCTIONS ====================
-struct SoilData {
-  float ec_uScm;
-  float ph;
-  float nitrates_mgkg;
-  bool valid;
-};
-
-SoilData readSoilSensor() {
-  SoilData data = {0, 0, 0, false};
-  
-  if (!modbus_ok) {
-    Serial.println("[SOIL] Modbus not initialized");
-    return data;
+bool initIMU(void) {
+  Serial.println("Initializing IMU...");
+  for (int retry = 0; retry < MAX_RETRIES; retry++) {
+    myICM.begin(Wire, 0x68);
+    if (myICM.status == ICM_20948_Stat_Ok) {
+      Serial.println("IMU OK at 0x68!");
+      return true;
+    }
+    
+    myICM.begin(Wire, 0x69);
+    if (myICM.status == ICM_20948_Stat_Ok) {
+      Serial.println("IMU OK at 0x69!");
+      return true;
+    }
+    
+    Serial.print("IMU retry ");
+    Serial.println(retry);
+    delay(100);
   }
+  error_state = ERROR_IMU_INIT;
+  Serial.println("IMU FAILED!");
+  return false;
+}
 
-  Serial.println("[SOIL] Reading EC, pH, Nitrates...");
+bool initBarometer(void) {
+  Serial.println("Initializing Barometer...");
+  for (int retry = 0; retry < MAX_RETRIES; retry++) {
+    if (baro.begin()) {
+      baro.setSeaPressure(1013.26);
+      
+      // Set to OSR=0 (fastest mode)
+      Wire.beginTransmission(0x60);
+      Wire.write(0x26);
+      Wire.write(0x39);
+      Wire.endTransmission();
+      
+      delay(20);
+      
+      // Verify
+      Wire.beginTransmission(0x60);
+      Wire.write(0x26);
+      Wire.endTransmission(false);
+      Wire.requestFrom(0x60, 1);
+      if (Wire.available()) {
+        uint8_t ctrl_reg = Wire.read();
+        Serial.print("Barometer CTRL_REG1 = 0x");
+        Serial.println(ctrl_reg, HEX);
+      }
+      
+      Serial.println("Barometer OK!");
+      return true;
+    }
+    Serial.print("Barometer retry ");
+    Serial.println(retry);
+    delay(100);
+  }
+  error_state = ERROR_BARO_INIT;
+  Serial.println("Barometer FAILED!");
+  return false;
+}
+
+void getCompileDateTime(char* buffer, size_t bufferSize) {
+  snprintf(buffer, bufferSize, "Session started (compile time EST): %s %s", __DATE__, __TIME__);
+}
+
+bool initLogFile(void) {
+  Serial.println("Initializing log file...");
+  for (int retry = 0; retry < MAX_RETRIES; retry++) {
+    logFile = SD.open("/imu_log.csv", FILE_WRITE);
+    if (logFile) {
+      char datetime[80];
+      getCompileDateTime(datetime, sizeof(datetime));
+      logFile.print("# ");
+      logFile.println(datetime);
+      
+      size_t written = logFile.println("timestamp_ms,ax,ay,az,gx,gy,gz,mx,my,mz,alt_m,temp_C");
+      if (written > 0) {
+        logFile.flush();
+        session_start_time = millis();
+        Serial.print("Log file OK! Header bytes: ");
+        Serial.println(written);
+        return true;
+      }
+      logFile.close();
+    }
+    Serial.print("Log file retry ");
+    Serial.println(retry);
+    delay(100);
+  }
+  error_state = ERROR_FILE_OPEN;
+  Serial.println("Log file FAILED!");
+  return false;
+}
+
+bool readIMUSensors(SensorData* data) {
+  if (data == NULL) {
+    error_state = ERROR_SENSOR_RANGE;
+    return false;
+  }
   
-  // Read 3 registers starting at 0x0002
-  uint8_t result = soilSensor.readHoldingRegisters(0x0002, 3);
+  if (!icm_ok) {
+    return false;
+  }
   
-  if (result == soilSensor.ku8MBSuccess) {
-    uint16_t ec_raw = soilSensor.getResponseBuffer(0);  // reg 0x0002
-    uint16_t ph_raw = soilSensor.getResponseBuffer(1);  // reg 0x0003
-    uint16_t n_raw  = soilSensor.getResponseBuffer(2);  // reg 0x0004
-    
-    data.ec_uScm = (float)ec_raw; 
-    data.ph = ph_raw * 0.1f;
-    data.nitrates_mgkg = (float)n_raw;
-    data.valid = true;
-    
-    Serial.print("[SOIL] EC: "); Serial.print(data.ec_uScm, 0); Serial.println(" uS/cm");
-    Serial.print("[SOIL] pH: "); Serial.println(data.ph, 1);
-    Serial.print("[SOIL]  N: "); Serial.print(data.nitrates_mgkg, 0); Serial.println(" mg/kg");
+  myICM.getAGMT();
+  if (myICM.status != ICM_20948_Stat_Ok) {
+    return false;
+  }
+  
+  data->ax = (myICM.accX() - accel_cal.offset_x) * accel_cal.scale_x;
+  data->ay = (myICM.accY() - accel_cal.offset_y) * accel_cal.scale_y;
+  data->az = (myICM.accZ() - accel_cal.offset_z) * accel_cal.scale_z;
+  
+  data->gx = myICM.gyrX();
+  data->gy = myICM.gyrY();
+  data->gz = myICM.gyrZ();
+  data->mx = myICM.magX();
+  data->my = myICM.magY();
+  data->mz = myICM.magZ();
+  
+  if (!assertRange(data->ax, ACCEL_MIN, ACCEL_MAX, ERROR_SENSOR_RANGE)) return false;
+  if (!assertRange(data->ay, ACCEL_MIN, ACCEL_MAX, ERROR_SENSOR_RANGE)) return false;
+  if (!assertRange(data->az, ACCEL_MIN, ACCEL_MAX, ERROR_SENSOR_RANGE)) return false;
+  if (!assertRange(data->gx, GYRO_MIN, GYRO_MAX, ERROR_SENSOR_RANGE)) return false;
+  if (!assertRange(data->gy, GYRO_MIN, GYRO_MAX, ERROR_SENSOR_RANGE)) return false;
+  if (!assertRange(data->gz, GYRO_MIN, GYRO_MAX, ERROR_SENSOR_RANGE)) return false;
+  
+  return true;
+}
+
+// Read barometer with timeout protection
+bool readBarometer(SensorData* data) {
+  if (data == NULL || !mpl_ok) {
+    return false;
+  }
+  
+  // Set default values in case of failure
+  data->altitude = 0.0f;
+  data->temperature = 25.0f;
+  
+  unsigned long start = millis();
+  
+  // Try to read altitude with timeout
+  data->altitude = baro.getAltitude();
+  if (millis() - start > 50) {  // 50ms timeout
+    Serial.println("Barometer altitude timeout!");
+    return false;
+  }
+  
+  // Try to read temperature with timeout
+  start = millis();
+  data->temperature = baro.getTemperature();
+  if (millis() - start > 50) {  // 50ms timeout
+    Serial.println("Barometer temperature timeout!");
+    return false;
+  }
+  
+  // Skip range validation for now - just return success
+  return true;
+}
+
+bool writeLogData(const SensorData* data) {
+  if (data == NULL) {
+    Serial.println("writeLogData: NULL data");
+    return false;
+  }
+  
+  if (!assertFileValid()) {
+    return false;
+  }
+  
+  char line[160];
+  int len = snprintf(line, sizeof(line),
+           "%lu,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.2f,%.2f",
+           data->timestamp, data->ax, data->ay, data->az,
+           data->gx, data->gy, data->gz,
+           data->mx, data->my, data->mz,
+           data->altitude, data->temperature);
+  
+  if (len < 0 || len >= (int)sizeof(line)) {
+    error_state = ERROR_WRITE_FAILED;
+    Serial.println("snprintf overflow!");
+    return false;
+  }
+  
+  size_t written = logFile.println(line);
+  if (written == 0) {
+    error_state = ERROR_WRITE_FAILED;
+    Serial.println("Write failed - 0 bytes!");
+    return false;
+  }
+  
+  return true;
+}
+
+void updateDisplay(const SensorData* data) {
+  if (!display_ok || data == NULL) {
+    return;
+  }
+  
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  
+  display.print("LOOP:");
+  display.println(loop_count);
+  
+  display.print("A:");
+  display.print(data->ax, 1);
+  display.print(",");
+  display.print(data->ay, 1);
+  display.print(",");
+  display.println(data->az, 1);
+  
+  display.print("Alt:");
+  display.print(data->altitude, 1);
+  display.print(" T:");
+  display.println(data->temperature, 1);
+  
+  display.print("Time:");
+  display.println(data->timestamp / 1000);
+  
+  display.display();
+}
+
+bool detectMovement(float ax, float ay, float az) {
+  if (sleep_state.first_read) {
+    sleep_state.last_ax = ax;
+    sleep_state.last_ay = ay;
+    sleep_state.last_az = az;
+    sleep_state.first_read = false;
+    sleep_state.stable_count = 0;
+    return true;
+  }
+  
+  float delta_ax = abs(ax - sleep_state.last_ax);
+  float delta_ay = abs(ay - sleep_state.last_ay);
+  float delta_az = abs(az - sleep_state.last_az);
+  
+  sleep_state.last_ax = ax;
+  sleep_state.last_ay = ay;
+  sleep_state.last_az = az;
+  
+  bool movement = (delta_ax > MOVEMENT_THRESHOLD || 
+                   delta_ay > MOVEMENT_THRESHOLD || 
+                   delta_az > MOVEMENT_THRESHOLD);
+  
+  if (movement) {
+    sleep_state.stable_count = 0;
+    return true;
   } else {
-    Serial.print("[SOIL] Read FAILED - Error: 0x");
-    Serial.println(result, HEX);
+    sleep_state.stable_count++;
+    return (sleep_state.stable_count < 50);
   }
-  
-  return data;
 }
 
-// ==================== MOTION DETECTION ====================
-bool detectMotion(float ax, float ay, float az) {
-  if (!baseline_set) {
-    // Set initial baseline
-    baseline_ax = ax;
-    baseline_ay = ay;
-    baseline_az = az;
-    baseline_set = true;
-    last_motion_time = millis();
-    return true; // Consider first reading as motion
+void enterLightSleep(void) {
+  Serial.println("Entering sleep mode...");
+  
+  if (display_ok) {
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println("No Movement");
+    display.println("Detected");
+    display.println("");
+    display.println("Entering Sleep");
+    display.print("Wake in ");
+    display.print(SLEEP_DURATION_SEC);
+    display.println("s");
+    display.display();
+    delay(1000);  // Show message for 1 second
   }
   
-  // Calculate delta from baseline
-  float delta_x = fabs(ax - baseline_ax);
-  float delta_y = fabs(ay - baseline_ay);
-  float delta_z = fabs(az - baseline_az);
-  
-  // Check if any axis exceeds threshold
-  if (delta_x > MOTION_THRESHOLD || 
-      delta_y > MOTION_THRESHOLD || 
-      delta_z > MOTION_THRESHOLD) {
-    
-    Serial.printf("[MOTION] Detected: dX=%.3f dY=%.3f dZ=%.3f\n", delta_x, delta_y, delta_z);
-    last_motion_time = millis();
-    
-    // Update baseline to current values
-    baseline_ax = ax;
-    baseline_ay = ay;
-    baseline_az = az;
-    
-    return true;
-  }
-  
-  return false;
-}
-
-bool isStable() {
-  unsigned long stable_duration = millis() - last_motion_time;
-  
-  if (stable_duration >= STABLE_TIME) {
-    Serial.printf("[STABLE] No motion for %.1f seconds\n", stable_duration / 1000.0f);
-    return true;
-  }
-  
-  return false;
-}
-
-// ==================== I2C BUS CLEARING ====================
-void clearI2CBus() {
-  Serial.println("[I2C] Clearing I2C bus...");
-  
-  const int SDA_PIN = 21;
-  const int SCL_PIN = 22;
-  
-  pinMode(SDA_PIN, OUTPUT);
-  pinMode(SCL_PIN, OUTPUT);
-  
-  for (int i = 0; i < 9; i++) {
-    digitalWrite(SCL_PIN, HIGH);
-    delayMicroseconds(5);
-    digitalWrite(SCL_PIN, LOW);
-    delayMicroseconds(5);
-  }
-  
-  digitalWrite(SDA_PIN, LOW);
-  delayMicroseconds(5);
-  digitalWrite(SCL_PIN, HIGH);
-  delayMicroseconds(5);
-  digitalWrite(SDA_PIN, HIGH);
-  delayMicroseconds(5);
-  
-  Serial.println("[I2C] Bus cleared");
-}
-
-// ==================== SLEEP MODE ====================
-void enterLightSleep() {
-  Serial.println("\n>>> [SLEEP] Entering light sleep mode...");
-  Serial.println(">>> [SLEEP] Will wake every 30 seconds to check for motion...");
-  Serial.flush();
-
-  // Close file before sleep
+  // Flush and close file before sleep
   if (logFile) {
+    Serial.println("Flushing and closing log file...");
+    logFile.flush();
     logFile.close();
   }
-
-  esp_sleep_enable_timer_wakeup(30 * 1000000); // 30 seconds
+  
+  // Configure timer wake source
+  esp_sleep_enable_timer_wakeup(SLEEP_DURATION_SEC * 1000000ULL);
+  
+  Serial.println("Entering light sleep now...");
+  // Enter light sleep
   esp_light_sleep_start();
-
-  Serial.println("\n*** [WAKE] Timer wake event ***");
-  Serial.println("*** [WAKE] Reinitializing peripherals...");
-
-  // Reinitialize I2C
-  clearI2CBus();
-  delay(50);
-  Wire.end();
-  delay(10);
+  
+  // ===== WAKEUP - Code continues here =====
+  Serial.println("Woke up from sleep!");
+  
+  // Reinitialize I2C bus
   Wire.begin();
-  Wire.setClock(100000);
   delay(100);
   
-  // Reinitialize ICM20948
-  if (icm_ok) {
-    myICM.begin(Wire, 0x68);
-    if (myICM.status != ICM_20948_Stat_Ok) {
-      myICM.begin(Wire, 0x69);
-    }
-    Serial.println("*** [WAKE] ICM20948 reinitialized");
-  }
-
-  // Reinitialize MPL3115A2
-  if (mpl3115_reset_and_init()) {
-    configureMPLInterrupt();
-    delay(200);
-    Serial.println("*** [WAKE] MPL3115A2 reinitialized");
-    mpl_ok = true;
-  } else {
-    Serial.println("*** [WAKE] MPL3115A2 reinit failed");
-    mpl_ok = false;
-  }
-
-  // Reinitialize SPI for SD card
-  spi.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
-  Serial.println("*** [WAKE] SPI reinitialized");
-
-  // Reinitialize Modbus
-  Serial2.begin(MODBUS_BAUD, SERIAL_8N1, RX2_PIN, TX2_PIN);
-  Serial.println("*** [WAKE] Modbus reinitialized");
-
-  // Reopen log file
-  logFile = SD.open("/sensor_log.csv", FILE_APPEND);
+  // Reopen log file in append mode
+  Serial.println("Reopening log file...");
+  logFile = SD.open("/imu_log.csv", FILE_APPEND);
   if (!logFile) {
-    Serial.println("*** [WAKE] Failed to reopen log file!");
+    Serial.println("ERROR: Failed to reopen log file!");
+  } else {
+    Serial.println("Log file reopened successfully");
   }
-
-  // Reset motion detection
-  baseline_set = false;
-  first_reading = true;
-
-  Serial.println("*** [WAKE] Active monitoring resumed ***\n");
+  
+  // Reset sleep state
+  sleep_state.first_read = true;
+  sleep_state.stable_count = 0;
+  
+  if (display_ok) {
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println("Woke from sleep");
+    display.println("Resuming logging...");
+    display.display();
+    delay(1000);
+  }
+  
+  Serial.println("Resuming normal operation\n");
 }
 
-// ==================== SETUP ====================
+void flushLogFile(void) {
+  static unsigned long lastFlush = 0;
+  unsigned long currentTime = millis();
+  
+  if (currentTime >= lastFlush && 
+      (currentTime - lastFlush) > FLUSH_INTERVAL_MS) {
+    logFile.flush();
+    lastFlush = currentTime;
+  }
+}
+
 void setup() {
-  Wire.begin();
-  Wire.setClock(100000);
   Serial.begin(115200);
-  delay(300);
-
-  Serial.println("\n========================================");
-  Serial.println("CUm Chalice - IMU Motion + Soil Sensor");
-  Serial.println("========================================");
-
-  // Initialize RS485 control pin
-  pinMode(RE_DE_PIN, OUTPUT);
-  digitalWrite(RE_DE_PIN, LOW); // Receive mode by default
-
-  // Initialize SPI for SD card
-  Serial.println("[INIT] Initializing SPI bus...");
+  delay(2000);  // Give time for Serial Monitor to open
+  
+  Serial.println("\n\n=== STARTING SETUP ===");
+  
+  Wire.begin();
+  delay(500);
+  
   spi.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
-
-  // Initialize SD card
-  Serial.println("[INIT] Initializing SD card...");
-  if (!SD.begin(SD_CS, spi)) {
-    Serial.println("[ERROR] SD init failed!");
-    while (1);
+  
+  if (!initDisplay()) {
+    Serial.println("FATAL: Display failed");
+    while(1) delay(1000);
   }
-  Serial.println("[OK] SD initialized.");
-
-  // Initialize ICM20948
-  Serial.println("[INIT] Initializing ICM20948...");
-  myICM.begin(Wire, 0x68);
-  if (myICM.status != ICM_20948_Stat_Ok) {
-    myICM.begin(Wire, 0x69);
+  display_ok = true;
+  
+  if (!initSD()) {
+    Serial.println("FATAL: SD failed");
+    while(1) delay(1000);
   }
-  if (myICM.status == ICM_20948_Stat_Ok) {
-    icm_ok = true;
-    Serial.println("[OK] ICM20948 ready.");
-  } else {
-    Serial.println("[ERROR] ICM20948 init failed!");
+  
+  if (!initIMU()) {
+    Serial.println("FATAL: IMU failed");
+    while(1) delay(1000);
   }
-
-  // Initialize MPL3115A2
-  Serial.println("[INIT] Initializing MPL3115A2...");
-  if (mplVerifyWhoAmI()) {
-    mpl_ok = true;
-    configureMPLInterrupt();
-    Serial.println("[OK] MPL3115A2 ready.");
-    delay(500);
-  } else {
-    Serial.println("[ERROR] MPL3115A2 not detected!");
+  icm_ok = true;
+  
+  if (!initBarometer()) {
+    Serial.println("WARNING: Barometer failed - continuing anyway");
     mpl_ok = false;
-  }
-
-  // Initialize INA3221
-  if (ina3221.begin()) {
-    ina_ok = true;
-    Serial.println("[OK] INA3221 present");
   } else {
-    ina_ok = false;
-    Serial.println("[WARN] INA3221 not detected");
+    mpl_ok = true;
   }
-
-  // Initialize Modbus
-  Serial.println("[INIT] Initializing Modbus (RS485)...");
-  Serial2.begin(MODBUS_BAUD, SERIAL_8N1, RX2_PIN, TX2_PIN);
-  soilSensor.begin(SLAVE_ID, Serial2);
-  soilSensor.preTransmission(preTransmission);
-  soilSensor.postTransmission(postTransmission);
-  modbus_ok = true;
-  Serial.println("[OK] Modbus initialized.");
-
-  // Create/clear log file
-  if (SD.exists("/sensor_log.csv")) {
-    SD.remove("/sensor_log.csv");
-    Serial.println("[INFO] Removed old log file");
+  
+  if (!initLogFile()) {
+    Serial.println("FATAL: Log file failed");
+    while(1) delay(1000);
   }
-
-  logFile = SD.open("/sensor_log.csv", FILE_WRITE);
-  if (!logFile) {
-    Serial.println("[ERROR] Failed to open file for writing!");
-    while (1);
+  
+  if (display_ok) {
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println("System Ready");
+    display.println("Logging...");
+    display.display();
   }
-  logFile.println("timestamp_ms,ax,ay,az,gx,gy,gz,mx,my,mz,alt_m,temp_C,ec_uScm,ph,nitrates_mgkg,soil_valid");
-  logFile.close();
-  Serial.println("[OK] Header written to CSV file.");
-
-  Serial.println("========================================");
-  Serial.println("[STATUS] Setup complete!");
-  Serial.println("[STATUS] Monitoring for motion...");
-  Serial.println("========================================\n");
+  
+  Serial.println("=== SETUP COMPLETE ===");
+  Serial.println("Entering loop...\n");
+  delay(1000);
 }
 
-// ==================== MAIN LOOP ====================
 void loop() {
-  static unsigned long last_log = 0;
-  static bool soil_reading_taken = false;
+  static int displayCounter = 0;
   
-  unsigned long now = millis();
-
-  // Read IMU data
-  float ax = 0, ay = 0, az = 0;
-  float gx = 0, gy = 0, gz = 0;
-  float mx = 0, my = 0, mz = 0;
-
-  if (icm_ok && myICM.dataReady()) {
-    myICM.getAGMT();
-    ax = myICM.accX();
-    ay = myICM.accY();
-    az = myICM.accZ();
-    gx = myICM.gyrX();
-    gy = myICM.gyrY();
-    gz = myICM.gyrZ();
-    mx = myICM.magX();
-    my = myICM.magY();
-    mz = myICM.magZ();
-  }
-
-  // Read altitude/temp
-  float altitude = NAN;
-  float temperature = NAN;
+  loop_count++;
   
-  if (mpl_ok) {
-    altitude = safeReadAltitude(500);
-    temperature = safeReadTemperature(100);
+  // Reduced serial output - only every 50 loops
+  if (loop_count % 50 == 0) {
+    Serial.print("Loop ");
+    Serial.println(loop_count);
   }
-
-  // Check for motion
-  bool motion = detectMotion(ax, ay, az);
   
-  if (motion) {
-    soil_reading_taken = false; // Reset flag when motion detected
+  SensorData data = {0};
+  data.timestamp = millis();
+  
+  // Read IMU
+  bool imu_success = readIMUSensors(&data);
+  if (!imu_success) {
+    if (loop_count % 50 == 0) {
+      Serial.println("IMU read failed!");
+    }
+    delay(LOOP_DELAY_MS);
+    return;
   }
-
-  // Initialize soil data
-  SoilData soil = {0, 0, 0, false};
-
-  // If stable and haven't taken reading yet, read soil sensor
-  if (isStable() && !soil_reading_taken) {
-    Serial.println("\n[TRIGGER] System stable - reading soil sensor!");
-    soil = readSoilSensor();
-    soil_reading_taken = true;
-    Serial.println();
-  }
-
-  // Log data every 500ms
-  if (now - last_log >= 500) {
-    last_log = now;
+  
+  // Set default barometer values (barometer disabled for speed)
+  data.altitude = 0.0f;
+  data.temperature = 25.0f;
+  
+  // Optional: Try barometer every 50 loops (1 second) if you want altitude/temp
+  if (mpl_ok && (loop_count % 50 == 0)) {
+    unsigned long baro_start = millis();
+    float alt = baro.getAltitude();
+    unsigned long baro_time = millis() - baro_start;
     
-    char line[250];
-    snprintf(line, sizeof(line),
-             "%lu,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.2f,%.2f,%.1f,%.1f,%.1f,%d",
-             now, ax, ay, az, gx, gy, gz, mx, my, mz,
-             isnan(altitude) ? -9999.0f : altitude,
-             isnan(temperature) ? -9999.0f : temperature,
-             soil.ec_uScm, soil.ph, soil.nitrates_mgkg, soil.valid ? 1 : 0);
-
-    logFile = SD.open("/sensor_log.csv", FILE_APPEND);
-    if (logFile) {
-      logFile.println(line);
-      logFile.close();
-      Serial.print("[LOG] ");
-      Serial.println(line);
+    if (baro_time < 100) {
+      data.altitude = alt;
+      data.temperature = baro.getTemperature();
     } else {
-      Serial.println("[ERROR] Failed to write to log file!");
+      Serial.println("Barometer too slow - disabling");
+      mpl_ok = false;
     }
   }
-
-  // Check if should enter sleep (stable for long time with soil reading complete)
-  if (isStable() && soil_reading_taken && (millis() - last_motion_time > 10000)) {
-    Serial.println("\n======================================");
-    Serial.println("[SLEEP] System stable with soil reading complete");
-    Serial.println("[SLEEP] Entering sleep mode...");
-    Serial.println("======================================");
-    
-    soil_reading_taken = false;
+  
+  // Check for movement
+  bool movement_detected = detectMovement(data.ax, data.ay, data.az);
+  
+  if (!movement_detected) {
+    Serial.println("No movement detected - entering sleep");
     enterLightSleep();
+    loop_count = 0;  // Reset counter after sleep
+    displayCounter = 0;
+    return;
   }
-
-  delay(100);
+  
+  // Write to log
+  if (!writeLogData(&data)) {
+    if (loop_count % 50 == 0) {
+      Serial.println("Write failed!");
+    }
+    delay(LOOP_DELAY_MS);
+    return;
+  }
+  
+  // Update display every 25 loops (500ms) to avoid I2C conflicts
+  displayCounter++;
+  if (display_ok && displayCounter >= 25) {
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    
+    display.print("LOGGING [");
+    display.print(loop_count);
+    display.println("]");
+    
+    // Display accelerometer data
+    display.print("A:");
+    display.print(data.ax, 1);
+    display.print(",");
+    display.print(data.ay, 1);
+    display.print(",");
+    display.println(data.az, 1);
+    
+    // Display gyroscope data
+    display.print("G:");
+    display.print(data.gx, 0);
+    display.print(",");
+    display.print(data.gy, 0);
+    display.print(",");
+    display.println(data.gz, 0);
+    
+    // Display altitude and temperature if available
+    if (mpl_ok) {
+      display.print("Alt:");
+      display.print(data.altitude, 1);
+      display.print(" T:");
+      display.println(data.temperature, 1);
+    }
+    
+    // Display timestamp
+    display.print("Time:");
+    display.print(data.timestamp / 1000);
+    display.println("s");
+    
+    display.display();
+    displayCounter = 0;
+  }
+  
+  // Flush periodically
+  flushLogFile();
+  
+  delay(LOOP_DELAY_MS);
 }
