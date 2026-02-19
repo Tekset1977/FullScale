@@ -16,6 +16,7 @@
 #define MAX_RETRIES 5
 #define FLUSH_INTERVAL_MS 2000
 #define LOOP_DELAY_MS 20
+#define BARO_CONVERSION_MS 8   // OSR=0: ~6ms, give 8ms margin
 
 // Sleep configuration
 #define SLEEP_DURATION_SEC 5
@@ -88,13 +89,17 @@ bool mpl_ok = false;
 bool display_ok = false;
 int error_state = ERROR_NONE;
 static unsigned long last_movement_ms = 0;
+static float baro_alt  = 0.0f;
+static float baro_temp = 25.0f;
+static bool  baro_triggered = false;
+static unsigned long baro_trigger_ms = 0;
 
 // Rule 5: Assertion for recovery
 bool assertRange(float value, float min, float max, int errorCode) {
   if (value < min || value > max) {
     error_state = errorCode;
     return false;
-  }
+  } 
   return true;
 }
 
@@ -140,18 +145,18 @@ bool initSD(void) {
 // Rule 2 & 4: Bounded IMU initialization
 bool initIMU(void) {
   for (int retry = 0; retry < MAX_RETRIES; retry++) {
-    if (!resetICM(0x68)) {
+    if (!resetICM(0x69)) {
       Serial.println("resetICM failed");
       delay(100);
       continue;
     }
-    myICM.begin(Wire, 0x68);
+    myICM.begin(Wire, 0x69);
     if (myICM.status != ICM_20948_Stat_Ok) {
       Serial.printf("myICM.begin failed, status=%d\n", myICM.status);
       delay(100);
       continue;
     }
-    myICM.startupMagnetometer();
+    // startupMagnetometer() removed — causes aux I2C hang on second getAGMT
     delay(100);
     return true;
   }
@@ -162,34 +167,26 @@ bool initIMU(void) {
 // Rule 2 & 4: Bounded barometer initialization
 bool initBarometer(void) {
   for (int retry = 0; retry < MAX_RETRIES; retry++) {
-    if (baro.begin()) {
+    if (!baro.begin()) { delay(100); continue; }
 
-      baro.setSeaPressure(1013.26);
+    baro.setSeaPressure(1013.26);
 
-      // Set to OSR = 0 (fastest mode)
-      Wire.beginTransmission(0x60);
-      Wire.write(0x26);
-      Wire.write(0x39);
-      Wire.endTransmission();
+    // Must go to standby before changing CTRL_REG1
+    Wire.beginTransmission(0x60);
+    Wire.write(0x26);
+    Wire.write(0x00);  // standby
+    Wire.endTransmission();
+    delay(10);
 
-      delay(20);
+    // OSR=0 (fastest ~6ms), altimeter mode, active
+    Wire.beginTransmission(0x60);
+    Wire.write(0x26);
+    Wire.write(0x81);  // 0b10000001
+    Wire.endTransmission();
+    delay(20);
 
-      // Verify control register
-      Wire.beginTransmission(0x60);
-      Wire.write(0x26);
-      Wire.endTransmission(false);
-      Wire.requestFrom(0x60, 1);
-
-      if (Wire.available()) {
-        uint8_t ctrl_reg = Wire.read();
-        // Optional: could validate ctrl_reg here
-      }
-
-      return true;
-    }
-    delay(100);
+    return true;
   }
-
   error_state = ERROR_BARO_INIT;
   return false;
 }
@@ -212,47 +209,148 @@ bool initLogFile(void) {
   return false;
 }
 
+void triggerBarometer(void) {
+  if (!mpl_ok) return;
+  // Set OST bit (one-shot trigger) while keeping OSR=0, ALT=1, SBYB=1
+  Wire.beginTransmission(0x60);
+  Wire.write(0x26);
+  Wire.write(0x83);  // 0b10000011: ALT + OSR=0 + OST + SBYB
+  Wire.endTransmission();
+  baro_triggered = true;
+  baro_trigger_ms = millis();
+}
+
+// Returns true if fresh data was read, false if still waiting
+bool pollBarometer(SensorData* data) {
+  if (!mpl_ok || data == NULL) return false;
+
+  if (!baro_triggered) {
+    data->altitude    = baro_alt;
+    data->temperature = baro_temp;
+    triggerBarometer();
+    return true;
+  }
+
+  if ((millis() - baro_trigger_ms) < BARO_CONVERSION_MS) {
+    data->altitude    = baro_alt;
+    data->temperature = baro_temp;
+    return true;
+  }
+
+  // Check DRDY (bit 3 of STATUS reg 0x00)
+  Wire.beginTransmission(0x60);
+  Wire.write(0x00);
+  Wire.endTransmission(false);
+  Wire.requestFrom((uint8_t)0x60, (uint8_t)1);
+  if (!Wire.available()) {
+    data->altitude = baro_alt;
+    data->temperature = baro_temp;
+    return true;
+  }
+  uint8_t status = Wire.read();
+  if (!(status & 0x08)) {
+    data->altitude = baro_alt;
+    data->temperature = baro_temp;
+    return true;
+  }
+
+  // Read altitude: OUT_P_MSB(0x01), OUT_P_CSB(0x02), OUT_P_LSB(0x03)
+  // Read temp:     OUT_T_MSB(0x04), OUT_T_LSB(0x05)
+  Wire.beginTransmission(0x60);
+  Wire.write(0x01);
+  Wire.endTransmission(false);
+  if (Wire.requestFrom((uint8_t)0x60, (uint8_t)5) != 5) {
+    data->altitude = baro_alt;
+    data->temperature = baro_temp;
+    triggerBarometer();
+    return true;
+  }
+
+  uint8_t p_msb = Wire.read();
+  uint8_t p_csb = Wire.read();
+  uint8_t p_lsb = Wire.read();
+  uint8_t t_msb = Wire.read();
+  uint8_t t_lsb = Wire.read();
+
+  // Altitude: 20-bit signed, Q16.4 format (integer metres in upper 16 bits)
+  int32_t alt_raw = ((int32_t)(int8_t)p_msb << 16) |
+                    ((uint32_t)p_csb << 8) |
+                    (uint32_t)p_lsb;
+  float alt = alt_raw / 65536.0f;  // LSB = 1/16 m = 0.0625m
+
+  // Temperature: 12-bit signed Q8.4
+  int16_t t_raw = ((int16_t)(int8_t)t_msb << 8) | t_lsb;
+  float temp = t_raw / 256.0f;
+
+  if (!assertRange(alt,  ALT_MIN, ALT_MAX,  ERROR_SENSOR_RANGE)) return false;
+  if (!assertRange(temp, TEMP_MIN, TEMP_MAX, ERROR_SENSOR_RANGE)) return false;
+
+  baro_alt  = alt;
+  baro_temp = temp;
+  data->altitude    = baro_alt;
+  data->temperature = baro_temp;
+
+  triggerBarometer();
+  return true;
+}
+
+// Add this helper
+void selectICMBank(uint8_t bank) {
+  Wire.beginTransmission(0x69);
+  Wire.write(0x7F);           // REG_BANK_SEL
+  Wire.write(bank << 4);
+  Wire.endTransmission();
+}
+
 // Rule 4 & 7: Read IMU sensors with validation
 // Rule 4 & 7: Read IMU sensors with validation
 bool readIMUSensors(SensorData* data) {
-  // Rule 5: Parameter validation
-  if (data == NULL) {
-    error_state = ERROR_SENSOR_RANGE;
-    return false;
-  }
+  if (data == NULL) { error_state = ERROR_SENSOR_RANGE; return false; }
+  if (!icm_ok) return false;
+
+  selectICMBank(0);
+
+  // Read accel (registers 0x2D-0x32) and gyro (0x33-0x38) directly
+  // No aux I2C involvement, no mag, no blocking
+  Wire.beginTransmission(0x69);
+  Wire.write(0x2D);  // ACCEL_XOUT_H
+  if (Wire.endTransmission(false) != 0) return false;
   
-  if (!icm_ok) {
-    return false;
-  }
-  
-  // Rule 7: Get sensor data and check status
-  myICM.getAGMT();
- if (myICM.status != ICM_20948_Stat_Ok && 
-    myICM.status != ICM_20948_Stat_WrongID) { // WrongID often means just mag timeout
-    Serial.printf("getAGMT status: %d\n", myICM.status);
-    return false;
-  }
-  
-  // Apply calibration
-  data->ax = (myICM.accX() - accel_cal.offset_x) * accel_cal.scale_x;
-  data->ay = (myICM.accY() - accel_cal.offset_y) * accel_cal.scale_y;
-  data->az = (myICM.accZ() - accel_cal.offset_z) * accel_cal.scale_z;
-  
-  data->gx = myICM.gyrX();
-  data->gy = myICM.gyrY();
-  data->gz = myICM.gyrZ();
-  data->mx = myICM.magX();
-  data->my = myICM.magY();
-  data->mz = myICM.magZ();
-  
-  // Rule 5: Validate sensor ranges
+  if (Wire.requestFrom((uint8_t)0x69, (uint8_t)12) != 12) return false;
+
+  int16_t raw_ax = (Wire.read() << 8) | Wire.read();
+  int16_t raw_ay = (Wire.read() << 8) | Wire.read();
+  int16_t raw_az = (Wire.read() << 8) | Wire.read();
+  int16_t raw_gx = (Wire.read() << 8) | Wire.read();
+  int16_t raw_gy = (Wire.read() << 8) | Wire.read();
+  int16_t raw_gz = (Wire.read() << 8) | Wire.read();
+
+  // Convert: default accel scale ±2g = 16384 LSB/g, then to mg (×1000/16384)
+  // Default gyro scale ±250dps = 131 LSB/dps
+  float ax_raw = raw_ax / 16.384f;  // in mg
+  float ay_raw = raw_ay / 16.384f;
+  float az_raw = raw_az / 16.384f;
+
+  data->ax = (ax_raw - accel_cal.offset_x) * accel_cal.scale_x;
+  data->ay = (ay_raw - accel_cal.offset_y) * accel_cal.scale_y;
+  data->az = (az_raw - accel_cal.offset_z) * accel_cal.scale_z;
+
+  data->gx = raw_gx / 131.0f;
+  data->gy = raw_gy / 131.0f;
+  data->gz = raw_gz / 131.0f;
+
+  // Zero mag — not used
+  data->mx = 0.0f;
+  data->my = 0.0f;
+  data->mz = 0.0f;
+
   if (!assertRange(data->ax, ACCEL_MIN, ACCEL_MAX, ERROR_SENSOR_RANGE)) return false;
   if (!assertRange(data->ay, ACCEL_MIN, ACCEL_MAX, ERROR_SENSOR_RANGE)) return false;
   if (!assertRange(data->az, ACCEL_MIN, ACCEL_MAX, ERROR_SENSOR_RANGE)) return false;
   if (!assertRange(data->gx, GYRO_MIN, GYRO_MAX, ERROR_SENSOR_RANGE)) return false;
   if (!assertRange(data->gy, GYRO_MIN, GYRO_MAX, ERROR_SENSOR_RANGE)) return false;
   if (!assertRange(data->gz, GYRO_MIN, GYRO_MAX, ERROR_SENSOR_RANGE)) return false;
-  
+
   return true;
 }
 
@@ -408,16 +506,17 @@ void enterLightSleep(void) {
   Serial.println("wakey-wakey");
 
   resetI2CBus(); 
+  Serial.println("I2C bus reset done");   
+
+  bool icm_reset = resetICM(0x69);
+  Serial.printf("resetICM result: %d\n", icm_reset);
 
   icm_ok = initIMU();
-  if (icm_ok) {
-  // Re-enable magnetometer aux I2C
-  myICM.startupMagnetometer();
-  delay(100);
-  }
+  Serial.printf("IMU after wake: %s  (icm_ok=%d)\n", icm_ok ? "OK" : "FAIL", icm_ok);
   Serial.printf("IMU: %s\n", icm_ok ? "OK" : "FAIL");
 
   mpl_ok = initBarometer();
+  Serial.printf("BARO after wake: %s  (mpl_ok=%d)\n", mpl_ok ? "OK" : "FAIL", mpl_ok);
   Serial.printf("BARO: %s\n", mpl_ok ? "OK" : "FAIL");
   if (mpl_ok) delay(150);
 
@@ -499,17 +598,8 @@ bool resetICM(uint8_t addr) {
   Serial.printf("resetICM addr=0x%02X endTransmission err=%d\n", addr, err);
   if (err != 0) return false;
 
-  delay(250);  // chip needs ~100ms to reset, 250 to be safe
-
-  // Confirm reset completed — chip auto-clears the bit when done
-  Wire.beginTransmission(addr);
-  Wire.write(0x06);
-  Wire.endTransmission(false);
-  Wire.requestFrom(addr, (uint8_t)1);
-  if (!Wire.available()) return false;
-  
-  uint8_t val = Wire.read();
-  return (val & 0x80) == 0;  // reset done when bit clears
+  delay(500);  // give chip plenty of time, no readback needed
+  return true;
 }
 
 void setup() {
@@ -517,6 +607,17 @@ void setup() {
   Wire.setTimeOut(100);
   delay(500);
   Serial.begin(115200);
+  delay(500); 
+  // I2C SCANNER — remove after diagnosis
+  Serial.println("Scanning I2C bus...");
+  for (uint8_t addr = 1; addr < 127; addr++) {
+    Wire.beginTransmission(addr);
+    uint8_t err = Wire.endTransmission();
+    if (err == 0) {
+      Serial.printf("  Found device at 0x%02X\n", addr);
+    }
+  }
+  Serial.println("Scan complete.");
   
   spi.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
   
@@ -544,13 +645,15 @@ void setup() {
 // Rule 4: Main loop kept under 60 lines
 void loop() {
   // Rule 6: Local scope for sensor data
-  Serial.println("loop tick");
+  Serial.printf("loop tick — icm_ok:%d mpl_ok:%d\n", icm_ok, mpl_ok);
+
   SensorData data = {0};
   data.timestamp = millis();
   Serial.println("A");
   // Read sensors with error checking
   bool imu_success = readIMUSensors(&data);
-  bool baro_success = readBarometer(&data);
+  Serial.println("A2");
+  bool baro_success = pollBarometer(&data);
   Serial.println("B");
   // Rule 5: Only process if we have valid data
   if (!imu_success || !baro_success) {
