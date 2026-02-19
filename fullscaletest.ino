@@ -88,7 +88,7 @@ bool icm_ok = false;
 bool mpl_ok = false;
 bool display_ok = false;
 int error_state = ERROR_NONE;
-static unsigned long last_movement_ms = 0;
+static unsigned long wake_time_ms = 0;
 static float baro_alt  = 0.0f;
 static float baro_temp = 25.0f;
 static bool  baro_triggered = false;
@@ -504,6 +504,7 @@ void enterLightSleep(void) {
   Serial.flush();               // ensure output completes before sleep
   esp_light_sleep_start();
   Serial.println("wakey-wakey");
+  wake_time_ms = millis();
 
   resetI2CBus(); 
   Serial.println("I2C bus reset done");   
@@ -638,7 +639,7 @@ void setup() {
   
   // Initial sleep cycle
   delay(100);
-  last_movement_ms = millis();
+  wake_time_ms = millis();
   enterLightSleep();
 }
 
@@ -676,19 +677,14 @@ void loop() {
   bool movement_detected = detectMovement(data.ax, data.ay, data.az);
   
   if (movement_detected) {
-    last_movement_ms = millis();  // Reset the idle timer on any movement
+    wake_time_ms = millis();  // Reset the idle timer on any movement
   }
-  unsigned long idle_ms = millis() - last_movement_ms;
+  unsigned long awake_ms = millis() - wake_time_ms;
 
- Serial.println("writing log");
   writeLogData(&data);
-
-  Serial.println("updating display");
-  updateDisplay(&data, movement_detected, idle_ms);
-
-  Serial.println("flushing");
+  updateDisplay(&data, movement_detected, awake_ms);
   flushLogFile();
 
-  if (idle_ms > MIN_AWAKE_MS) enterLightSleep();
+  if (awake_ms > MIN_AWAKE_MS) enterLightSleep();
   delay(LOOP_DELAY_MS);
 }
