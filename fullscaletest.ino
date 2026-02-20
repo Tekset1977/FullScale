@@ -301,10 +301,10 @@ bool pollBarometer(SensorData* data) {
   uint8_t t_lsb = Wire.read();
 
   // Altitude: 20-bit signed, Q16.4 format (integer metres in upper 16 bits)
-  int32_t alt_raw = ((int32_t)(int8_t)p_msb << 16) |
-                    ((uint32_t)p_csb << 8) |
-                    (uint32_t)p_lsb;
-  float alt = alt_raw / 65536.0f;  // LSB = 1/16 m = 0.0625m
+  int32_t alt_raw = ((int32_t)(int8_t)p_msb << 12) |
+                    ((uint32_t)p_csb << 4) |
+                    (p_lsb >> 4);
+  float alt = alt_raw / 16.0f;  // 1 LSB = 0.0625 m
 
   // Temperature: 12-bit signed Q8.4
   int16_t t_raw = ((int16_t)(int8_t)t_msb << 8) | t_lsb;
