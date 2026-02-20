@@ -39,6 +39,12 @@
 #define TEMP_MIN  -50.0f
 #define TEMP_MAX   100.0f
 
+//LED bullshit to be removed for the servo instead at the later date
+#define LED_PIN        26
+#define ALT_FEET_THRESHOLD 20.0f
+#define ALT_METERS_THRESHOLD (ALT_FEET_THRESHOLD * 0.3048f)  // ~6.096m
+
+
 // Error codes
 #define ERROR_NONE 0
 #define ERROR_SD_INIT 1
@@ -208,6 +214,28 @@ bool initLogFile(void) {
   error_state = ERROR_FILE_OPEN;
   return false;
 }
+
+//LED bullshit function 
+void updateAltitudeLED(float altitude_m) {
+  static bool led_state = false;
+  static unsigned long last_blink_ms = 0;
+
+  if (altitude_m >= ALT_METERS_THRESHOLD) {
+    // Blink at 2 Hz (toggle every 250ms)
+    unsigned long now = millis();
+    if (now - last_blink_ms >= 250) {
+      led_state = !led_state;
+      digitalWrite(LED_PIN, led_state ? HIGH : LOW);
+      last_blink_ms = now;
+    }
+  } else {
+    // Below threshold — ensure LED is off
+    led_state = false;
+    digitalWrite(LED_PIN, LOW);
+  }
+}
+
+
 
 void triggerBarometer(void) {
   if (!mpl_ok) return;
@@ -609,6 +637,10 @@ void setup() {
   delay(500);
   Serial.begin(115200);
   delay(500); 
+  //LED bullshit, replace with servo
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);
+
   // I2C SCANNER — remove after diagnosis
   Serial.println("Scanning I2C bus...");
   for (uint8_t addr = 1; addr < 127; addr++) {
@@ -672,6 +704,8 @@ void loop() {
   return;
   }
   Serial.println("sensors OK");
+  //LED 1 line below
+  updateAltitudeLED(data.altitude);
   
   // Check for movement
   bool movement_detected = detectMovement(data.ax, data.ay, data.az);
