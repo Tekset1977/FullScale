@@ -23,6 +23,11 @@
 #define MOVEMENT_THRESHOLD 200.0f  // m/s² acceleration threshold
 #define MIN_AWAKE_MS 5000 
 
+// Altitude band
+#define ALT_BAND_FT_LO  290.0f
+#define ALT_BAND_FT_HI  310.0f
+#define ALT_WAKE_THRESHOLD_M 10.0f
+
 // Display configuration
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
@@ -41,9 +46,8 @@
 
 //LED bullshit to be removed for the servo instead at the later date
 #define LED_PIN        26
-#define ALT_FEET_THRESHOLD 20.0f
-#define ALT_METERS_THRESHOLD (ALT_FEET_THRESHOLD * 0.3048f)  // ~6.096m
-
+#define ALT_DESCENT_BAND_LO_M  (450.0f * 0.3048f)   // ~137.2 m
+#define ALT_DESCENT_BAND_HI_M  (500.0f * 0.3048f)   // ~152.4 m
 
 // Error codes
 #define ERROR_NONE 0
@@ -99,6 +103,9 @@ static float baro_alt  = 0.0f;
 static float baro_temp = 25.0f;
 static bool  baro_triggered = false;
 static unsigned long baro_trigger_ms = 0;
+
+static float alt_ref_m = 0.0f;
+static bool  alt_ref_initialized = false;
 
 // Rule 5: Assertion for recovery
 bool assertRange(float value, float min, float max, int errorCode) {
@@ -217,22 +224,20 @@ bool initLogFile(void) {
 
 //LED bullshit function 
 void updateAltitudeLED(float altitude_m) {
-  static bool led_state = false;
-  static unsigned long last_blink_ms = 0;
+  static bool has_been_above_band = false;
+  static bool led_latched = false;
 
-  if (altitude_m >= ALT_METERS_THRESHOLD) {
-    // Blink at 2 Hz (toggle every 250ms)
-    unsigned long now = millis();
-    if (now - last_blink_ms >= 250) {
-      led_state = !led_state;
-      digitalWrite(LED_PIN, led_state ? HIGH : LOW);
-      last_blink_ms = now;
-    }
-  } else {
-    // Below threshold — ensure LED is off
-    led_state = false;
-    digitalWrite(LED_PIN, LOW);
+  // Arm the trigger once we climb above the band
+  if (altitude_m > ALT_DESCENT_BAND_HI_M) {
+    has_been_above_band = true;
   }
+
+  // Fire when descending back through the top of the band
+  if (has_been_above_band && altitude_m < ALT_DESCENT_BAND_HI_M) {
+    led_latched = true;
+  }
+
+  digitalWrite(LED_PIN, led_latched ? HIGH : LOW);
 }
 
 
@@ -677,42 +682,53 @@ void setup() {
 
 // Rule 4: Main loop kept under 60 lines
 void loop() {
-  // Rule 6: Local scope for sensor data
   Serial.printf("loop tick — icm_ok:%d mpl_ok:%d\n", icm_ok, mpl_ok);
 
   SensorData data = {0};
   data.timestamp = millis();
   Serial.println("A");
-  // Read sensors with error checking
+
   bool imu_success = readIMUSensors(&data);
   Serial.println("A2");
   bool baro_success = pollBarometer(&data);
   Serial.println("B");
-  // Rule 5: Only process if we have valid data
+
   if (!imu_success || !baro_success) {
     if (display_ok) {
-    display.clearDisplay();
-    display.setCursor(0, 0);
-    display.print("Sensor fail: ");
-    display.print(imu_success  ? "" : "IMU ");
-    display.print(baro_success ? "" : "BARO");
-    display.display();
+      display.clearDisplay();
+      display.setCursor(0, 0);
+      display.print("Sensor fail: ");
+      display.print(imu_success  ? "" : "IMU ");
+      display.print(baro_success ? "" : "BARO");
+      display.display();
+    }
+    Serial.printf("Sensor fail — IMU:%d BARO:%d err:%d\n",
+                  imu_success, baro_success, error_state);
+    delay(LOOP_DELAY_MS);
+    return;
   }
-  Serial.printf("Sensor fail — IMU:%d BARO:%d err:%d\n",
-                imu_success, baro_success, error_state);
-  delay(LOOP_DELAY_MS);
-  return;
-  }
+
   Serial.println("sensors OK");
-  //LED 1 line below
   updateAltitudeLED(data.altitude);
-  
-  // Check for movement
+
+  // Movement check
   bool movement_detected = detectMovement(data.ax, data.ay, data.az);
-  
   if (movement_detected) {
-    wake_time_ms = millis();  // Reset the idle timer on any movement
+    wake_time_ms = millis();
   }
+
+  // Altitude change check
+  if (!alt_ref_initialized) {
+    alt_ref_m = data.altitude;
+    alt_ref_initialized = true;
+  }
+  float alt_delta = fabsf(data.altitude - alt_ref_m);
+  if (alt_delta >= ALT_WAKE_THRESHOLD_M) {
+    wake_time_ms = millis();
+    alt_ref_m = data.altitude;
+    Serial.printf("Alt change %.1fm — resetting idle timer\n", alt_delta);
+  }  // <-- block closes HERE, not after everything else
+
   unsigned long awake_ms = millis() - wake_time_ms;
 
   writeLogData(&data);
