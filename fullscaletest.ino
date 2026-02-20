@@ -46,8 +46,8 @@
 
 //LED bullshit to be removed for the servo instead at the later date
 #define LED_PIN        26
-#define ALT_DESCENT_BAND_LO_M  (450.0f * 0.3048f)   // ~137.2 m
-#define ALT_DESCENT_BAND_HI_M  (500.0f * 0.3048f)   // ~152.4 m
+#define ALT_DESCENT_BAND_LO_M  (700.0f * 0.3048f)   // ~220 m
+#define ALT_DESCENT_BAND_HI_M  (721.0f * 0.3048f)   // ~230 m
 
 // Error codes
 #define ERROR_NONE 0
@@ -227,13 +227,13 @@ void updateAltitudeLED(float altitude_m) {
   static bool has_been_above_band = false;
   static bool led_latched = false;
 
-  // Arm the trigger once we climb above the band
+  // Arm once we've genuinely climbed above 500 ft
   if (altitude_m > ALT_DESCENT_BAND_HI_M) {
     has_been_above_band = true;
   }
 
-  // Fire when descending back through the top of the band
-  if (has_been_above_band && altitude_m < ALT_DESCENT_BAND_HI_M) {
+  // Only trigger when we've descended all the way through to below 450 ft
+  if (has_been_above_band && altitude_m < ALT_DESCENT_BAND_LO_M) {
     led_latched = true;
   }
 
