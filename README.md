@@ -5,3 +5,6 @@ In the fullscaletest.ino is a file from 2/17/2026. I made the updates to be ever
 
 changelog since 2/18/2026. 
 Modified fullscaletest.ino by adding verbose reset I2C bus and ICM. Display still doesn't work and there's a problem with the loop actually looping through. Tests show that the I2C bus is still taken up by something during new polling for data from MPL, which stalemates it. Maybe, if I do the aggregate: "send only sensor data every 25 loops to the display" it will fix itself. But there's still an issue of recording it to the SD file. I've been assured that the slower ICM should not affect fast MPL, but Im not so sure. Perhaps if I oversample ICM to the same degree it will fix itself magically.
+
+changelog since 2/19/2026 
+I2C communication now works just in time and everything is SD logged in time. Had to remove electromagnetic measurment, because it's easier to delete unnecessary measurment, than to fluff with adafruit libraries. Added LED test that is meant to simulate servomotor, code for which will be added in a final iteration soon(tm). Implemented a threshold metric that uses 2 values, to measure the top and bottom altitudes, after the top altitude is reached, we wait for the bottom one to trigger LED. This would imply descent. 
