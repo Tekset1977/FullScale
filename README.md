@@ -8,3 +8,6 @@ Modified fullscaletest.ino by adding verbose reset I2C bus and ICM. Display stil
 
 changelog since 2/19/2026 
 I2C communication now works just in time and everything is SD logged in time. Had to remove electromagnetic measurment, because it's easier to delete unnecessary measurment, than to fluff with adafruit libraries. Added LED test that is meant to simulate servomotor, code for which will be added in a final iteration soon(tm). Implemented a threshold metric that uses 2 values, to measure the top and bottom altitudes, after the top altitude is reached, we wait for the bottom one to trigger LED. This would imply descent. 
+
+changelog since 2/24/2026 
+https://github.com/oopCole added servo controls to the code instead of LED. Made OLED presence non-critical issue, so it can run without the display connected now. Also, changed code to be NASA 10 rules compliant and easier to read. Tested in the vacuum chamber and is proven to be working. 
