@@ -11,3 +11,6 @@ I2C communication now works just in time and everything is SD logged in time. Ha
 
 changelog since 2/24/2026 
 https://github.com/oopCole added servo controls to the code instead of LED. Made OLED presence non-critical issue, so it can run without the display connected now. Also, changed code to be NASA 10 rules compliant and easier to read. Tested in the vacuum chamber and is proven to be working. 
+
+changelog since 2/25/2026 
+Changed the altimeter data gets from continuous to one-off with the manual DRDY reset. It is basically continouos, but Im doing it via manual register manipulation, instead of internal libraries and default settings. This actually yields unique altitude results every ~60ms (the 30ms datapoint doubles) except unique data every 1 second as it was before with continuous mode. Also, added a note to excel to highlight when exactly servomotor is activated, it now shows time and altitude.
