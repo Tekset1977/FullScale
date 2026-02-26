@@ -25,6 +25,7 @@ static const uint32_t CFG_BARO_CONV_MS       = 8UL;
 static const uint32_t CFG_SLEEP_DURATION_SEC = 5UL;
 static const uint32_t CFG_MIN_AWAKE_MS       = 5000UL;
 static const uint32_t CFG_BARO_TIMEOUT_MS    = 200UL;
+static unsigned long s_wake_time_ms = 0UL;
 
 // R8: Movement / altitude thresholds
 static const float    CFG_MOVEMENT_THRESHOLD_MPS2 = 200.0f;
@@ -58,8 +59,8 @@ static const int      SERVO_ANGLE_MAX   =  60;
 static const int      SERVO_ANGLE_INIT  =  50;   // home position
 static const int      SERVO_ANGLE_GO    =  10;   // release position
 
-static const float    ALT_BAND_LO_M = 730.0f * 0.3048f;   // write first value as actual foot value
-static const float    ALT_BAND_HI_M = 892.0f * 0.3048f;   // here as well
+static const float    ALT_BAND_LO_M = 4.0f;     //400.0f * 0.3048f;   // write first value as actual foot value
+static const float    ALT_BAND_HI_M =  16.0f;     //800.0f * 0.3048f;   // here as well
 // =========================================
 
 // R8: Error codes
@@ -110,6 +111,7 @@ static bool g_icm_ok     = false;
 static bool g_mpl_ok     = false;
 static bool g_display_ok = false;
 static int  g_error_state = ERR_NONE;
+static float g_alt_baseline_m = 0.0f; //Static value, sets 0ft as baseline whenever the altimeter starts
 
 static const AccelCal ACCEL_CAL = {
     -40.5f, -5.0f, 16.0f,   // offsets x, y, z
@@ -284,7 +286,7 @@ static bool configureBaroRegisters(void) {
     delay(10);
 
     // OSR=0 (fastest ~6 ms), altimeter mode, active
-    ok = i2cWriteReg(I2C_ADDR_BARO, 0x26U, 0x81U);
+    ok = i2cWriteReg(I2C_ADDR_BARO, 0x26U, 0x80U);
     if (!ok) { return false; }
     delay(20);
     return true;
@@ -390,6 +392,34 @@ static bool writeServoAngle(int angle) {
     return writeServoPulse((uint32_t)pulse);  // R7: return propagated
 }
 
+
+//  R4/R5/R7: Write a one-off servo-event line to the log file
+static bool writeServoEvent(float altitude_m) {
+    // R5: Assert file is open and altitude is in valid range
+    if (!assertFileValid())                                               { return false; }
+    if (!assertRange(altitude_m, ALT_MIN_M, ALT_MAX_M, ERR_SENSOR_RANGE)){ return false; }
+
+    char line[96];
+    int len = snprintf(line, sizeof(line),
+        "SERVO_RELEASE,ts_ms=%lu,alt_m=%.3f",
+        (unsigned long)millis(),
+        altitude_m);
+
+    if (len < 0 || len >= (int)sizeof(line)) {   // R7: snprintf return checked
+        g_error_state = ERR_WRITE_FAILED;
+        return false;
+    }
+
+    size_t written = g_logFile.println(line);    // R7: return checked
+    if (written == 0U) {
+        g_error_state = ERR_WRITE_FAILED;
+        return false;
+    }
+
+    g_logFile.flush();   // flush immediately so the event survives a crash/cutoff
+    return true;
+}
+
 //  R1/R4/R5/R6: Altitude-controlled servo release
 static void updateAltitudeServo(float altitude_m) {
     // R6: Descent-band state variables at smallest possible scope (static local)
@@ -407,7 +437,17 @@ static void updateAltitudeServo(float altitude_m) {
 
     if (s_above_band && !s_triggered && altitude_m < ALT_BAND_LO_M) {
         s_triggered = true;
-        Serial.println("Descent band detected — RELEASE");
+
+        Serial.printf("SERVO TRIGGER — ts=%lu ms  alt=%.3f m\n", //serial print for testing
+                  (unsigned long)millis(), altitude_m);   
+        
+        // --- record the exact moment before any mechanical delay ---
+        bool ev_ok = writeServoEvent(altitude_m);   // R7: checked
+        if (!ev_ok) { Serial.println("Servo event log FAILED"); }
+
+        Serial.printf("Descent band detected — RELEASE  ts=%lu ms  alt=%.3f m\n",
+                      (unsigned long)millis(), altitude_m);
+
         bool ok = writeServoAngle(SERVO_ANGLE_GO);  // R7: checked
         if (!ok) { Serial.println("Servo write failed on release"); }
         delay(SERVO_MOVE_MS);
@@ -421,7 +461,7 @@ static void triggerBarometer(void) {
     if (I2C_ADDR_BARO == 0U) { return; }
 
     // OSR=0, altimeter, OST (one-shot trigger), SBYB
-    bool ok = i2cWriteReg(I2C_ADDR_BARO, 0x26U, 0x83U);  // R7: checked
+    bool ok = i2cWriteReg(I2C_ADDR_BARO, 0x26U, 0x82U);  // R7: checked
     // R5: Log if trigger write failed (non-fatal — will retry next cycle)
     if (!ok) { Serial.println("Baro trigger write failed"); }
 }
@@ -488,11 +528,14 @@ static bool pollBarometer(SensorData* data) {
     uint8_t status_byte = 0U;
     uint8_t got = i2cReadBytes(I2C_ADDR_BARO, 0x00U, &status_byte, 1U);  // R7: checked
     if (got != 1U || !(status_byte & 0x08U)) {
-        data->altitude    = s_baro_alt;
-        data->temperature = s_baro_temp;
-        return true;
+        if ((now - s_trigger_ms) > CFG_BARO_TIMEOUT_MS) {
+            s_triggered = false;
+            Serial.println("Baro DRDY timeout — re-triggering");
+        }
+    data->altitude    = s_baro_alt;
+    data->temperature = s_baro_temp;
+    return true;
     }
-
     // Data ready — decode
     float new_alt  = 0.0f;
     float new_temp = 0.0f;
@@ -788,6 +831,8 @@ static void enterLightSleep(void) {
     esp_light_sleep_start();
     Serial.println("woke up");
 
+    s_wake_time_ms = (unsigned long)millis();
+
     wakeReinitPeripherals();   
     wakeReopenLogFile();       
 }
@@ -865,17 +910,19 @@ void setup(void) {
     if (!initBarometer()) { return; }
     g_mpl_ok = true;
 
+    // Read ground altitude and store as baseline
+    g_alt_baseline_m = g_baro.getAltitude();
+    Serial.printf("Baseline altitude: %.2f m\n", g_alt_baseline_m);
+
     if (!initLogFile())   { return; }
 
     delay(100);
     enterLightSleep();
 }
 
-// =============================================================================
 //  loop()
-// =============================================================================
 void loop(void) {
-    static unsigned long s_wake_time_ms = 0UL;
+    
 
     Serial.printf("tick — icm:%d mpl:%d\n", g_icm_ok, g_mpl_ok);
 
@@ -889,6 +936,8 @@ void loop(void) {
 
     bool imu_ok  = readIMUSensors(&data);   // R7: checked
     bool baro_ok = pollBarometer(&data);    // R7: checked
+
+    data.altitude -= g_alt_baseline_m; //subtracting og value from the procedural readings
 
     // R5: Assert error state is valid (within defined range)
     if (g_error_state < ERR_NONE || g_error_state > ERR_DISPLAY_INIT) {
