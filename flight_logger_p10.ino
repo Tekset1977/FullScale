@@ -59,8 +59,8 @@ static const int      SERVO_ANGLE_MAX   =  60;
 static const int      SERVO_ANGLE_INIT  =  50;   // home position
 static const int      SERVO_ANGLE_GO    =  10;   // release position
 
-static const float    ALT_BAND_LO_M = 4.0f;     //400.0f * 0.3048f;   // write first value as actual foot value
-static const float    ALT_BAND_HI_M =  16.0f;     //800.0f * 0.3048f;   // here as well
+static const float    ALT_BAND_LO_M = 200.0f;     //400.0f * 0.3048f;   // write first value as actual foot value
+static const float    ALT_BAND_HI_M =  500.0f;     //800.0f * 0.3048f;   // here as well
 // =========================================
 
 // R8: Error codes
