@@ -22,3 +22,6 @@ https://github.com/oopCole added servo controls to the code instead of LED. Made
 
 changelog since 2/25/2026 
 Changed the altimeter data gets from continuous to one-off with the manual DRDY reset. It is basically continouos, but Im doing it via manual register manipulation, instead of internal libraries and default settings. This actually yields unique altitude results every ~60ms (the 30ms datapoint doubles) except unique data every 1 second as it was before with continuous mode. Also, added a note to excel to highlight when exactly servomotor is activated, it now shows time and altitude.
+
+changelog since 3/17/2026 
+Added ifdef DEBUG to the flight_logger_p10.ino. Now, if the #define DEBUG is commented out, the serial prints will not appear. This will save computational power during actual code deployment, and allow for easy testing.
