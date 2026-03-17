@@ -6,6 +6,8 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
+#define DEBUG
+
 // -----------------------------------------------------------------------------
 //  R8: Hardware pin constants  (typed static const, not #define)
 // -----------------------------------------------------------------------------
@@ -59,8 +61,8 @@ static const int      SERVO_ANGLE_MAX   =  60;
 static const int      SERVO_ANGLE_INIT  =  50;   // home position
 static const int      SERVO_ANGLE_GO    =  10;   // release position
 
-static const float    ALT_BAND_LO_M = 200.0f;     //400.0f * 0.3048f;   // write first value as actual foot value
-static const float    ALT_BAND_HI_M =  500.0f;     //800.0f * 0.3048f;   // here as well
+static const float    ALT_BAND_LO_M = 400.0f * 0.3048f;   // write first value as actual foot value
+static const float    ALT_BAND_HI_M =  800.0f * 0.3048f;   // here as well
 // =========================================
 
 // R8: Error codes
@@ -76,6 +78,13 @@ static const int ERR_DISPLAY_INIT  = 7;
 // R8: I2C addresses
 static const uint8_t I2C_ADDR_ICM  = 0x69U;
 static const uint8_t I2C_ADDR_BARO = 0x60U;
+
+//Landing Process 
+static const uint32_t CFG_POST_LANDING_AWAKE_MS = 15UL * 60UL * 1000UL; // 15 minutes
+
+static bool          g_landing_confirmed  = false;
+static unsigned long g_landing_time_ms    = 0UL;
+static const float CFG_LANDING_ALT_THRESHOLD_M = 5.0f; // within 5m of ground 
 
 // -----------------------------------------------------------------------------
 //  Data structures
@@ -242,7 +251,9 @@ static bool resetICM(uint8_t addr) {
     bool ok = i2cWriteReg(addr, 0x06U, 0x80U);  // R7: return checked
     // R5: Assert write succeeded before waiting
     if (!ok) {
+#ifdef DEBUG
         Serial.printf("resetICM addr=0x%02X write failed\n", addr);
+#endif
         return false;
     }
     delay(500);
@@ -261,13 +272,17 @@ static bool initIMU(void) {
 
     for (int retry = 0; retry < CFG_MAX_RETRIES; retry++) {  // R2: bounded
         if (!resetICM(I2C_ADDR_ICM)) {
+#ifdef DEBUG
             Serial.println("resetICM failed");
+#endif
             delay(100);
             continue;
         }
         g_icm.begin(Wire, I2C_ADDR_ICM);
         if (g_icm.status != ICM_20948_Stat_Ok) {
+#ifdef DEBUG
             Serial.printf("ICM begin failed, status=%d\n", g_icm.status);
+#endif
             delay(100);
             continue;
         }
@@ -438,18 +453,26 @@ static void updateAltitudeServo(float altitude_m) {
     if (s_above_band && !s_triggered && altitude_m < ALT_BAND_LO_M) {
         s_triggered = true;
 
-        Serial.printf("SERVO TRIGGER — ts=%lu ms  alt=%.3f m\n", //serial print for testing
-                  (unsigned long)millis(), altitude_m);   
-        
+#ifdef DEBUG
+        Serial.printf("SERVO TRIGGER — ts=%lu ms  alt=%.3f m\n",
+                      (unsigned long)millis(), altitude_m);
+#endif
+
         // --- record the exact moment before any mechanical delay ---
         bool ev_ok = writeServoEvent(altitude_m);   // R7: checked
+#ifdef DEBUG
         if (!ev_ok) { Serial.println("Servo event log FAILED"); }
+#endif
 
+#ifdef DEBUG
         Serial.printf("Descent band detected — RELEASE  ts=%lu ms  alt=%.3f m\n",
                       (unsigned long)millis(), altitude_m);
+#endif
 
         bool ok = writeServoAngle(SERVO_ANGLE_GO);  // R7: checked
+#ifdef DEBUG
         if (!ok) { Serial.println("Servo write failed on release"); }
+#endif
         delay(SERVO_MOVE_MS);
     }
 }
@@ -463,7 +486,9 @@ static void triggerBarometer(void) {
     // OSR=0, altimeter, OST (one-shot trigger), SBYB
     bool ok = i2cWriteReg(I2C_ADDR_BARO, 0x26U, 0x82U);  // R7: checked
     // R5: Log if trigger write failed (non-fatal — will retry next cycle)
+#ifdef DEBUG
     if (!ok) { Serial.println("Baro trigger write failed"); }
+#endif
 }
 
 //  R4: Barometer helper — read 5 raw bytes and decode altitude + temperature
@@ -530,7 +555,9 @@ static bool pollBarometer(SensorData* data) {
     if (got != 1U || !(status_byte & 0x08U)) {
         if ((now - s_trigger_ms) > CFG_BARO_TIMEOUT_MS) {
             s_triggered = false;
+#ifdef DEBUG
             Serial.println("Baro DRDY timeout — re-triggering");
+#endif
         }
     data->altitude    = s_baro_alt;
     data->temperature = s_baro_temp;
@@ -738,8 +765,10 @@ static void resetI2CBus(void) {
     pinMode(PIN_I2C_SCL, INPUT_PULLUP);
     delay(10);
 
+#ifdef DEBUG
     if (digitalRead(PIN_I2C_SDA) == LOW) { Serial.println("SDA stuck LOW after recovery"); }
     if (digitalRead(PIN_I2C_SCL) == LOW) { Serial.println("SCL stuck LOW after recovery"); }
+#endif
 
     Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
     Wire.setTimeOut(100);
@@ -771,20 +800,30 @@ static void wakeReinitPeripherals(void) {
     if (CFG_SLEEP_DURATION_SEC == 0UL) { return; }
 
     resetI2CBus();
+#ifdef DEBUG
     Serial.println("I2C bus reset done");
+#endif
 
     bool icm_reset = resetICM(I2C_ADDR_ICM);   // R7: checked
+#ifdef DEBUG
     Serial.printf("resetICM: %d\n", icm_reset);
+#endif
 
     g_icm_ok = initIMU();
+#ifdef DEBUG
     Serial.printf("IMU: %s\n", g_icm_ok ? "OK" : "FAIL");
+#endif
 
     g_mpl_ok = initBarometer();
+#ifdef DEBUG
     Serial.printf("BARO: %s\n", g_mpl_ok ? "OK" : "FAIL");
+#endif
     if (g_mpl_ok) { delay(150); }
 
     g_display_ok = initDisplay();
+#ifdef DEBUG
     Serial.printf("DISP: %s\n", g_display_ok ? "OK" : "FAIL");
+#endif
 }
 
 //  R4: Sleep wake-up — reopen SD log file  (split from enterLightSleep)
@@ -795,17 +834,23 @@ static void wakeReopenLogFile(void) {
     if (g_logFile) { g_logFile.close(); }
 
     if (!SD.begin(PIN_SD_CS, g_spi)) {
+#ifdef DEBUG
         Serial.println("SD re-init FAIL");
+#endif
         return;
     }
+#ifdef DEBUG
     Serial.println("SD re-init OK");
+#endif
 
     g_logFile = SD.open("/imu_log.csv", FILE_APPEND);
+#ifdef DEBUG
     if (!g_logFile) {
         Serial.println("File open FAIL");
     } else {
         Serial.println("File open OK");
     }
+#endif
 }
 
 //  R4/R5: Enter light sleep then reinitialise on wake
@@ -826,10 +871,14 @@ static void enterLightSleep(void) {
 
     esp_sleep_enable_timer_wakeup(
         (uint64_t)CFG_SLEEP_DURATION_SEC * 1000000ULL);
+#ifdef DEBUG
     Serial.println("sleeping...");
     Serial.flush();
+#endif
     esp_light_sleep_start();
+#ifdef DEBUG
     Serial.println("woke up");
+#endif
 
     s_wake_time_ms = (unsigned long)millis();
 
@@ -858,7 +907,9 @@ static void updateAltitudeIdleTimer(float altitude_m,
     if (delta >= CFG_ALT_WAKE_THRESHOLD_M) {
         *wake_time_ms = (unsigned long)millis();
         s_alt_ref_m   = altitude_m;
+#ifdef DEBUG
         Serial.printf("Alt change %.1fm — resetting idle timer\n", delta);
+#endif
     }
 }
 
@@ -872,23 +923,32 @@ void setup(void) {
     // R7: Check LEDC attach return value
     bool ledc_ok = ledcAttach(PIN_SERVO, PWM_FREQ_HZ, PWM_RES_BITS);
     if (!ledc_ok) {
+#ifdef DEBUG
         Serial.println("LEDC attach FAIL");
+#endif
     } else {
         bool servo_ok = writeServoAngle(SERVO_ANGLE_INIT);  // R7: checked
+#ifdef DEBUG
         if (!servo_ok) { Serial.println("Servo init write FAIL"); }
+#endif
     }
 
     // R5: Assert SPI pins are distinct before bus initialisation
     if (PIN_SPI_SCK == PIN_SPI_MISO || PIN_SPI_SCK == PIN_SPI_MOSI) {
+#ifdef DEBUG
         Serial.println("SPI pin config error — halting");
+#endif
         return;
     }
     // R5: Assert Wire timeout is set (nonzero implies Wire.begin succeeded)
     if (Wire.getTimeOut() == 0U) {
+#ifdef DEBUG
         Serial.println("Wire timeout not set — halting");
+#endif
         return;
     }
 
+#ifdef DEBUG
     Serial.println("Scanning I2C...");
     for (uint8_t addr = 1U; addr < 127U; addr++) {   // R2: bounded 1..126
         Wire.beginTransmission(addr);
@@ -896,6 +956,7 @@ void setup(void) {
         if (err == 0U) { Serial.printf("  0x%02X\n", addr); }
     }
     Serial.println("Scan done.");
+#endif
 
     g_spi.begin(PIN_SPI_SCK, PIN_SPI_MISO, PIN_SPI_MOSI);
 
@@ -912,19 +973,22 @@ void setup(void) {
 
     // Read ground altitude and store as baseline
     g_alt_baseline_m = g_baro.getAltitude();
+#ifdef DEBUG
     Serial.printf("Baseline altitude: %.2f m\n", g_alt_baseline_m);
+#endif
 
     if (!initLogFile())   { return; }
 
     delay(100);
-    enterLightSleep();
+   // enterLightSleep();
 }
 
 //  loop()
 void loop(void) {
     
-
+#ifdef DEBUG
     Serial.printf("tick — icm:%d mpl:%d\n", g_icm_ok, g_mpl_ok);
+#endif
 
     SensorData data;
     data.timestamp   = (unsigned long)millis();
@@ -953,8 +1017,10 @@ void loop(void) {
             if (!baro_ok) { g_display.print(" BARO"); }
             g_display.display();
         }
+#ifdef DEBUG
         Serial.printf("Fail — IMU:%d BARO:%d err:%d\n",
                       imu_ok, baro_ok, g_error_state);
+#endif
         delay(CFG_LOOP_DELAY_MS);
         return;
     }
@@ -969,11 +1035,13 @@ void loop(void) {
     unsigned long awake_ms = (unsigned long)millis() - s_wake_time_ms;
 
     bool log_ok = writeLogData(&data);   // R7: checked
+#ifdef DEBUG
     if (!log_ok) { Serial.println("Log write failed"); }
+#endif
 
     updateDisplay(&data, moving, awake_ms);
     flushLogFile();
 
-    if (awake_ms > CFG_MIN_AWAKE_MS) { enterLightSleep(); }
+   // if (awake_ms > CFG_MIN_AWAKE_MS) { enterLightSleep(); }
     delay(CFG_LOOP_DELAY_MS);
 }
