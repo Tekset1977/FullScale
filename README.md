@@ -29,3 +29,6 @@ Changed the altimeter data gets from continuous to one-off with the manual DRDY 
 
 changelog since 3/17/2026 
 Added ifdef DEBUG to the flight_logger_p10.ino. Now, if the #define DEBUG is commented out, the serial prints will not appear. This will save computational power during actual code deployment, and allow for easy testing. Added flight_logger_p11.ino which now has 2 ring buffers for sensor data. This increased processing time to 26ms. At least, this is what log_file in SD card tells me. Also, added fragmented version of it in the folder, so that people without mental could read it.
+
+changelog since 3/19/2026 
+Added empty shells for future DC and servomotors. Awaiting hardware to actually start coding them. Also, did stage introduction, so now main thing that happens is pre_flight_stage andflight_stage, with ground_stage awaiting aforementioned hardware. A bit of re-structuring was needed to introduce stages, but I think alt_threshold servo still works as intended. 
