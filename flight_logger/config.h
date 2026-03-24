@@ -83,6 +83,7 @@ static const int ERR_FILE_OPEN    = 4;
 static const int ERR_SENSOR_RANGE = 5;
 static const int ERR_WRITE_FAILED = 6;
 static const int ERR_DISPLAY_INIT = 7;
+static const int ERR_NULL_PTR     = 8;
 
 // -----------------------------------------------------------------------------
 //  I2C addresses
@@ -97,6 +98,19 @@ static const uint8_t I2C_ADDR_BARO = 0x60U;
 // -----------------------------------------------------------------------------
 static const uint8_t ICM_RING_SIZE = 32U;
 static const uint8_t MPL_RING_SIZE = 16U;
+
+
+//------------------------------
+//DC Motors stuff 
+//-------------
+static const uint8_t  PIN_MOT_A_IN1 = 25U;
+static const uint8_t  PIN_MOT_A_IN2 = 26U;
+static const uint8_t  PIN_MOT_B_IN1 = 32U;
+static const uint8_t  PIN_MOT_B_IN2 = 33U;
+static const uint8_t  PWM_MOT_CHAN_A = 2U;
+static const uint8_t  PWM_MOT_CHAN_B = 3U;
+static const uint8_t  PWM_MOT_RES    = 8U;   // 0–255
+static const uint32_t PWM_MOT_FREQ   = 20000UL;
 
 // -----------------------------------------------------------------------------
 //  Data structures

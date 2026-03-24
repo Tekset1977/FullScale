@@ -9,7 +9,7 @@ MplRingBuf g_mpl_buf = {{}, 0U, 0U, 0U};
 
 // Push — overwrites oldest entry on overrun (non-fatal)
 void icmBufPush(const IcmSample* s) {
-    if (!assertNotNull(s, ERR_SENSOR_RANGE)) { return; }
+    if (!assertNotNull(s, ERR_NULL_PTR)) { return; }
 
     g_icm_buf.data[g_icm_buf.head] = *s;
     g_icm_buf.head = (uint8_t)((g_icm_buf.head + 1U) % ICM_RING_SIZE);

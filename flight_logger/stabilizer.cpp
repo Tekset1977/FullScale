@@ -22,6 +22,7 @@ static int pidStep(PidState* s, float error) {
     // float deriv    = (error - s->prev_error) / dt;
     // s->prev_error  = error;
     // return (int)(s->kp * error + s->ki * s->integral + s->kd * deriv);
+    
 }
 
 void updateStabilizer(const SensorData* data) {
@@ -35,4 +36,5 @@ void updateStabilizer(const SensorData* data) {
 
     // writeServoAngle(2, constrain(cmd_pitch, SERVO_ANGLE_MIN, SERVO_ANGLE_MAX));
     // writeServoAngle(3, constrain(cmd_roll,  SERVO_ANGLE_MIN, SERVO_ANGLE_MAX));
+    
 }

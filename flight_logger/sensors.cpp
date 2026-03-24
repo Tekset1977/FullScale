@@ -194,8 +194,8 @@ static bool readBaroRawBytes(float* alt_out, float* temp_out) {
                        (buf[2] >> 4);
     float alt  = (float)alt_raw / 16.0f;
 
-    int16_t t_raw = ((int16_t)(int8_t)buf[3] << 8) | (int16_t)buf[4];
-    float   temp  = (float)t_raw / 256.0f;
+    int16_t t_raw = ((int16_t)(int8_t)buf[3] << 4) | (buf[4] >> 4);
+    float   temp  = (float)t_raw / 16.0f;
 
     if (!assertRange(alt,  ALT_MIN_M,  ALT_MAX_M,  ERR_SENSOR_RANGE)) { return false; }
     if (!assertRange(temp, TEMP_MIN_C, TEMP_MAX_C, ERR_SENSOR_RANGE)) { return false; }
@@ -268,6 +268,7 @@ bool detectMovement(float ax, float ay, float az) {
 
     if (!assertRange(ax, ACCEL_MIN_MPS2, ACCEL_MAX_MPS2, ERR_SENSOR_RANGE)) { return false; }
     if (!assertRange(ay, ACCEL_MIN_MPS2, ACCEL_MAX_MPS2, ERR_SENSOR_RANGE)) { return false; }
+    if (!assertRange(az, ACCEL_MIN_MPS2, ACCEL_MAX_MPS2, ERR_SENSOR_RANGE)) { return false; }
 
     if (s_first_read) {
         s_last_ax    = ax;
@@ -328,6 +329,6 @@ void resetI2CBus(void) {
 #endif
 
     Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
-    Wire.setTimeOut(100);
+    Wire.setTimeOut(100); //in miliseconds on ESP32wroomD 
     delay(100);
 }
