@@ -32,3 +32,9 @@ Added ifdef DEBUG to the flight_logger_p10.ino. Now, if the #define DEBUG is com
 
 changelog since 3/19/2026 
 Added empty shells for future DC and servomotors. Awaiting hardware to actually start coding them. Also, did stage introduction, so now main thing that happens is pre_flight_stage andflight_stage, with ground_stage awaiting aforementioned hardware. A bit of re-structuring was needed to introduce stages, but I think alt_threshold servo still works as intended. 
+
+changelog since 3/23/2026 
+Beautified the code by making it more efficient, and changed the servo code to avoid delay(500) problem, during which it would not record any sensor data. 
+
+changelog since 3/24/2026 
+Added soil sensor behaviour to the ground stage and modified storage code to create additional .csv file on the SD card to hold values.
