@@ -9,6 +9,7 @@
 static SPIClass g_spi(VSPI);
 static File     g_logFile;
 static File     g_servoFile;
+static File     g_soilFile;   // FIX 4: added for soil log
 
 // File-valid assertion — private to this module
 static bool assertFileValid(void) {
@@ -61,7 +62,6 @@ bool initLogFile(void) {
 
         g_logFile.flush();
 
-        // Open servo event file alongside the main log
         g_servoFile = SD.open("/servo_log.csv", FILE_WRITE);
         if (!g_servoFile) { g_logFile.close(); delay(100); continue; }
 
@@ -69,6 +69,25 @@ bool initLogFile(void) {
         if (written == 0U) { g_servoFile.close(); g_logFile.close(); delay(100); continue; }
 
         g_servoFile.flush();
+        return true;
+    }
+    g_error_state = ERR_FILE_OPEN;
+    return false;
+}
+
+// FIX 4: initSoilLogFile — was declared in storage.h but never implemented
+bool initSoilLogFile(void) {
+    static const char* const HEADER =
+        "timestamp_ms,moisture,stemma_temp_c,ec_uScm,ph,n_mgkg,modbus,dataq";
+
+    for (int retry = 0; retry < CFG_MAX_RETRIES; retry++) {
+        g_soilFile = SD.open("/soil_log.csv", FILE_WRITE);
+        if (!g_soilFile) { delay(100); continue; }
+
+        size_t written = g_soilFile.println(HEADER);
+        if (written == 0U) { g_soilFile.close(); delay(100); continue; }
+
+        g_soilFile.flush();
         return true;
     }
     g_error_state = ERR_FILE_OPEN;
@@ -128,6 +147,38 @@ bool writeServoEvent(float altitude_m) {
     return true;
 }
 
+// FIX 4: writeSoilData — was declared in storage.h but never implemented
+bool writeSoilData(const SoilSample* s) {
+    if (!assertNotNull(s, ERR_WRITE_FAILED)) { return false; }
+    if (!g_soilFile) {
+        g_error_state = ERR_WRITE_FAILED;
+        return false;
+    }
+
+    char line[128];
+    int len = snprintf(line, sizeof(line),
+        "%lu,%.3f,%.1f,%.0f,%.1f,%.0f,%s,%s",
+        s->timestamp,
+        s->moisture,
+        s->stemma_temp_c,
+        s->ec_uScm,
+        s->ph,
+        s->n_mgkg,
+        s->modbus_tag,
+        s->dataq);
+
+    if (len < 0 || len >= (int)sizeof(line)) {
+        g_error_state = ERR_WRITE_FAILED;
+        return false;
+    }
+    size_t written = g_soilFile.println(line);
+    if (written == 0U) {
+        g_error_state = ERR_WRITE_FAILED;
+        return false;
+    }
+    return true;
+}
+
 // Drain both ring buffers and write paired rows to the SD log.
 // Stops when either buffer runs dry so the two streams stay in lock-step.
 void drainBufsToLog(void) {
@@ -156,7 +207,7 @@ void drainBufsToLog(void) {
 
 void flushLogFile(void) {
     static uint32_t s_last_flush_ms = 0UL;
-    if (!g_logFile)                  { return; }
+    if (!g_logFile)                   { return; }
     if (CFG_FLUSH_INTERVAL_MS == 0UL) { return; }
 
     uint32_t now = (uint32_t)millis();
@@ -174,12 +225,14 @@ void flushLogFile(void) {
 void storageCloseFiles(void) {
     if (g_logFile)   { g_logFile.flush();   g_logFile.close();   }
     if (g_servoFile) { g_servoFile.flush(); g_servoFile.close(); }
+    if (g_soilFile)  { g_soilFile.flush();  g_soilFile.close();  }  // FIX 5: was missing
 }
 
 void storageReopenFiles(void) {
     if (PIN_SD_CS == 0U) { return; }
     if (g_logFile)   { g_logFile.close();   }
     if (g_servoFile) { g_servoFile.close(); }
+    if (g_soilFile)  { g_soilFile.close();  }  // FIX 5: was missing
 
     if (!SD.begin(PIN_SD_CS, g_spi)) {
 #ifdef DEBUG
@@ -202,4 +255,14 @@ void storageReopenFiles(void) {
     if (!g_servoFile) { Serial.println("Servo file reopen FAIL"); }
     else              { Serial.println("Servo file reopen OK");   }
 #endif
+
+    // FIX 5: soil file reopen was missing
+    // Only reopen if it was previously opened (i.e. ground stage has started)
+    if (g_soilFile) {
+        g_soilFile = SD.open("/soil_log.csv", FILE_APPEND);
+#ifdef DEBUG
+        if (!g_soilFile) { Serial.println("Soil file reopen FAIL"); }
+        else             { Serial.println("Soil file reopen OK");   }
+#endif
+    }
 }

@@ -11,6 +11,8 @@ static float computeAngle(float ax, float ay, float az,
     //     return atan2f(ax, sqrtf(ay*ay + az*az)) * 57.2958f;
     // else
     //     return atan2f(ay, sqrtf(ax*ax + az*az)) * 57.2958f;
+    (void)ax; (void)ay; (void)az; (void)pitch_not_roll;
+    return 0.0f;   // FIX 7: stub return — was missing, causing undefined behaviour
 }
 
 static int pidStep(PidState* s, float error) {
@@ -22,7 +24,12 @@ static int pidStep(PidState* s, float error) {
     // float deriv    = (error - s->prev_error) / dt;
     // s->prev_error  = error;
     // return (int)(s->kp * error + s->ki * s->integral + s->kd * deriv);
-    
+    (void)s; (void)error;
+    return 0;   // FIX 7: stub return — was missing, causing undefined behaviour
+}
+
+void initStabilizer(void) {
+    // TODO: implement
 }
 
 void updateStabilizer(const SensorData* data) {
@@ -31,10 +38,14 @@ void updateStabilizer(const SensorData* data) {
     // float pitch = computeAngle(data->ax, data->ay, data->az, true);
     // float roll  = computeAngle(data->ax, data->ay, data->az, false);
 
-    // int cmd_pitch = pidStep(&s_pitch_pid, -pitch);   // setpoint = 0°
+    // int cmd_pitch = pidStep(&s_pitch_pid, -pitch);   // setpoint = 0 degrees
     // int cmd_roll  = pidStep(&s_roll_pid,  -roll);
 
     // writeServoAngle(2, constrain(cmd_pitch, SERVO_ANGLE_MIN, SERVO_ANGLE_MAX));
     // writeServoAngle(3, constrain(cmd_roll,  SERVO_ANGLE_MIN, SERVO_ANGLE_MAX));
-    
+    (void)data;
+}
+
+void resetStabilizer(void) {
+    // TODO: implement
 }

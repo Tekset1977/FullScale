@@ -18,8 +18,9 @@
 #include "servo.h"
 #include "sleep.h"
 #include "stage.h"   // FlightStage enum + g_stage
+#include "soil.h"
 
-//Forward declarations
+// Forward declarations
 static void flightLoop(SensorData* data);
 static void groundLoop(SensorData* data);
 static void initGroundStage(void);
@@ -96,15 +97,14 @@ void setup(void) {
     // enterLightSleep();   // uncomment to sleep on first boot
 }
 
-//  loop() -- shared sensor, then stage
+// loop() — shared sensor reads, then stage dispatch
 void loop(void) {
 #ifdef DEBUG
     Serial.printf("tick — icm:%d mpl:%d  stage:%d\n",
                   g_icm_ok, g_mpl_ok, (int)g_stage);
 #endif
 
-    //Shared -- runs every tick regardless of stage 
-
+    // Shared — runs every tick regardless of stage
     SensorData data;
     data.timestamp   = (unsigned long)millis();
     data.ax = data.ay = data.az = 0.0f;
@@ -119,8 +119,9 @@ void loop(void) {
     // Subtract baseline once here so both stage functions see relative altitude
     data.altitude -= g_alt_baseline_m;
 
-    // Clamp error state to known range
-    if (g_error_state < ERR_NONE || g_error_state > ERR_DISPLAY_INIT) {
+    // FIX 6: clamp was ERR_DISPLAY_INIT (7) — ERR_NULL_PTR/ERR_SOIL_* (8-10) were
+    // silently reset to ERR_NONE. Now uses ERR_MAX which is kept in sync in config.h.
+    if (g_error_state < ERR_NONE || g_error_state > ERR_MAX) {
         g_error_state = ERR_NONE;
     }
 
@@ -134,8 +135,7 @@ void loop(void) {
         return;
     }
 
-    // ── stage dispatch 
-
+    // Stage dispatch
     switch (g_stage) {
         case STAGE_FLIGHT: flightLoop(&data); break;
         case STAGE_GROUND: groundLoop(&data); break;
@@ -145,11 +145,10 @@ void loop(void) {
     delay(CFG_LOOP_DELAY_MS);
 }
 
-//  flightLoop() — original behaviour
+// flightLoop() — original behaviour
 static void flightLoop(SensorData* data) {
 
-    //landing detection and stage transition
-
+    // Landing detection and stage transition
     if (!g_landing_confirmed && data->altitude < CFG_LANDING_ALT_THRESHOLD_M) {
         g_landing_confirmed = true;
         g_landing_time_ms   = millis();
@@ -170,8 +169,7 @@ static void flightLoop(SensorData* data) {
         }
     }
 
-    //flight operations (identical to original loop body)
-
+    // Flight operations
     updateAltitudeServo(data->altitude);
 
     bool moving = detectMovement(data->ax, data->ay, data->az);
@@ -203,12 +201,12 @@ static void flightLoop(SensorData* data) {
     // if (awake_ms > CFG_MIN_AWAKE_MS) { enterLightSleep(); }
 }
 
-//  groundLoop() — placeholder, fill in when hardware is ready
+// groundLoop() — IMU/baro logging + 1 Hz soil reads
 static void groundLoop(SensorData* data) {
     // TODO: 2-servo stabilisation
     // TODO: 2x DC motor drive
 
-    // Logging carries over so the SD record is uninterrupted
+    // IMU/baro logging carries over so the SD record is uninterrupted
     IcmSample icm_s = {
         data->timestamp,
         data->ax, data->ay, data->az,
@@ -226,14 +224,33 @@ static void groundLoop(SensorData* data) {
 
     drainBufsToLog();
     flushLogFile();
+
+    // Soil — read at 1 Hz, not every 20 ms tick
+    static uint32_t s_last_soil_ms = 0UL;
+    uint32_t now = (uint32_t)millis();
+    if ((now - s_last_soil_ms) >= SOIL_LOG_INTERVAL_MS) {
+        s_last_soil_ms = now;
+        SoilSample soil;
+        if (readSoilSensors(&soil)) {
+            writeSoilData(&soil);
+        }
+    }
 }
-//  initGroundStage() — placeholder, fill in when hardware is ready
+
+// initGroundStage() — called once on STAGE_FLIGHT -> STAGE_GROUND transition
 static void initGroundStage(void) {
 #ifdef DEBUG
     Serial.println(">>> Entering STAGE_GROUND");
 #endif
+
+    if (!initSoilSensors()) {
+        // Log the failure but don't halt — IMU/baro logging should continue
+#ifdef DEBUG
+        Serial.printf("Soil init failed, err=%d\n", g_error_state);
+#endif
+    }
+    initSoilLogFile();
     // TODO: attach stabiliser servo LEDC channels
     // TODO: initMotors()
     // TODO: resetStabilizer()
-    // TODO: Soilsensor()
 }
