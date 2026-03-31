@@ -38,3 +38,8 @@ Beautified the code by making it more efficient, and changed the servo code to a
 
 changelog since 3/24/2026 
 Added soil sensor behaviour to the ground stage and modified storage code to create additional .csv file on the SD card to hold values.
+
+changelog since 3/31/2026
+I have impleneted codex for AI-led code reviews. In order to compile the flight_logger from wsl, one need to make sure arduino-cli is installed, then run the command:
+arduino-cli compile --fqbn esp32:esp32:esp32 --libraries 'C:\RocketPrjcts\libraries' --build-path 'C:\RocketPrjcts\flight_logger\.arduino-build' 'C:\RocketPrjcts\flight_logger'
+Make sure that your arduino dependancies and libraries are in the correct path. 
