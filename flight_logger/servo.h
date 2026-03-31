@@ -4,3 +4,4 @@
 
 bool writeServoAngle(int angle);
 void updateAltitudeServo(float altitude_m);
+bool servoHasActuated(void);

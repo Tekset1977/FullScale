@@ -149,7 +149,9 @@ void loop(void) {
 static void flightLoop(SensorData* data) {
 
     // Landing detection and stage transition
-    if (!g_landing_confirmed && data->altitude < CFG_LANDING_ALT_THRESHOLD_M) {
+    if (!g_landing_confirmed &&
+        servoHasActuated() &&
+        data->altitude < CFG_LANDING_ALT_THRESHOLD_M) {
         g_landing_confirmed = true;
         g_landing_time_ms   = millis();
 #ifdef DEBUG

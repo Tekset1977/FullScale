@@ -30,6 +30,8 @@ static bool writeServoPulse(uint32_t pulse_us) {
     return ledcWrite(PIN_SERVO, duty);
 }
 
+static bool g_servo_actuated = false;
+
 // =============================================================================
 //  Public API
 // =============================================================================
@@ -71,6 +73,9 @@ void updateAltitudeServo(float altitude_m) {
 
         bool ev_ok = writeServoEvent(altitude_m);
         bool ok    = writeServoAngle(SERVO_ANGLE_GO);
+        if (ok) {
+            g_servo_actuated = true;
+        }
 
 #ifdef DEBUG
         Serial.printf("SERVO TRIGGER — ts=%lu ms  alt=%.3f m\n",
@@ -84,4 +89,8 @@ void updateAltitudeServo(float altitude_m) {
     if (s_moving && ((uint32_t)millis() - s_move_start) >= SERVO_MOVE_MS) {
         s_moving = false;
     }
+}
+
+bool servoHasActuated(void) {
+    return g_servo_actuated;
 }
