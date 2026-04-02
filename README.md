@@ -43,3 +43,7 @@ changelog since 3/31/2026
 I have impleneted codex for AI-led code reviews. In order to compile the flight_logger from wsl, one need to make sure arduino-cli is installed, then run the command:
 arduino-cli compile --fqbn esp32:esp32:esp32 --libraries 'C:\RocketPrjcts\libraries' --build-path 'C:\RocketPrjcts\flight_logger\.arduino-build' 'C:\RocketPrjcts\flight_logger'
 Make sure that your arduino dependancies and libraries are in the correct path. 
+
+changelog since 4/2/2026 
+Removed dead magnetometer polling, it had it coming for a long time. Also, fixed a buffer bug where it would pop the data before verification of succesfull write, replaced it with peek-write-pop instead, so now if the write files, data point is not lost. 
+Also added a remote SD card re-initialisation, in case it fails during the flight. The data keeps being written to the buffers while it happens, so nothing is lost. A new .csv file is created after rebooting, and all the data is dumped there. Never seen SD card failing while in flight in such a manner, but now we have it addressed. 
