@@ -16,34 +16,44 @@ Different .inos are as follows:
 In the fullscaletest.ino is a file from 2/17/2026. I made the updates to be every 35ms. Which is not planned 20ms, but fairly close and I belive would yield usable data. Unfortunately, unlike ModifiedSub.ino it does not look beautiful, since there's a problem with Display and Sleep Mode. If those 2 things are gone, SD card write/flush works fine. I suspect its the I2C clutter and timing misfire, blocking the code from progression. Needs more testing. Debating wether or not to add failsafe to the code to make it run no matter what. Nasa would love it. Barometer was an issue, but I fixed it by writing directly to it and avoiding Adafruit. Otherwise, sample was too slow. Wondering how I got it to work the first time. Perhaps it wasn't even working the first time either and I was too naive and lacking scrutiny to notice. 
 
 changelog since 2/18/2026. 
+
 Modified fullscaletest.ino by adding verbose reset I2C bus and ICM. Display still doesn't work and there's a problem with the loop actually looping through. Tests show that the I2C bus is still taken up by something during new polling for data from MPL, which stalemates it. Maybe, if I do the aggregate: "send only sensor data every 25 loops to the display" it will fix itself. But there's still an issue of recording it to the SD file. I've been assured that the slower ICM should not affect fast MPL, but Im not so sure. Perhaps if I oversample ICM to the same degree it will fix itself magically.
 
 changelog since 2/19/2026 
+
 I2C communication now works just in time and everything is SD logged in time. Had to remove electromagnetic measurment, because it's easier to delete unnecessary measurment, than to fluff with adafruit libraries. Added LED test that is meant to simulate servomotor, code for which will be added in a final iteration soon(tm). Implemented a threshold metric that uses 2 values, to measure the top and bottom altitudes, after the top altitude is reached, we wait for the bottom one to trigger LED. This would imply descent. 
 
-changelog since 2/24/2026 
+changelog since 2/24/2026
+
 https://github.com/oopCole added servo controls to the code instead of LED. Made OLED presence non-critical issue, so it can run without the display connected now. Also, changed code to be NASA 10 rules compliant and easier to read. Tested in the vacuum chamber and is proven to be working. 
 
 changelog since 2/25/2026 
+
 Changed the altimeter data gets from continuous to one-off with the manual DRDY reset. It is basically continouos, but Im doing it via manual register manipulation, instead of internal libraries and default settings. This actually yields unique altitude results every ~60ms (the 30ms datapoint doubles) except unique data every 1 second as it was before with continuous mode. Also, added a note to excel to highlight when exactly servomotor is activated, it now shows time and altitude.
 
 changelog since 3/17/2026 
+
 Added ifdef DEBUG to the flight_logger_p10.ino. Now, if the #define DEBUG is commented out, the serial prints will not appear. This will save computational power during actual code deployment, and allow for easy testing. Added flight_logger_p11.ino which now has 2 ring buffers for sensor data. This increased processing time to 26ms. At least, this is what log_file in SD card tells me. Also, added fragmented version of it in the folder, so that people without mental could read it.
 
 changelog since 3/19/2026 
+
 Added empty shells for future DC and servomotors. Awaiting hardware to actually start coding them. Also, did stage introduction, so now main thing that happens is pre_flight_stage andflight_stage, with ground_stage awaiting aforementioned hardware. A bit of re-structuring was needed to introduce stages, but I think alt_threshold servo still works as intended. 
 
 changelog since 3/23/2026 
+
 Beautified the code by making it more efficient, and changed the servo code to avoid delay(500) problem, during which it would not record any sensor data. 
 
 changelog since 3/24/2026 
+
 Added soil sensor behaviour to the ground stage and modified storage code to create additional .csv file on the SD card to hold values.
 
 changelog since 3/31/2026
+
 I have impleneted codex for AI-led code reviews. In order to compile the flight_logger from wsl, one need to make sure arduino-cli is installed, then run the command:
 arduino-cli compile --fqbn esp32:esp32:esp32 --libraries 'C:\RocketPrjcts\libraries' --build-path 'C:\RocketPrjcts\flight_logger\.arduino-build' 'C:\RocketPrjcts\flight_logger'
 Make sure that your arduino dependancies and libraries are in the correct path. 
 
 changelog since 4/2/2026 
+
 Removed dead magnetometer polling, it had it coming for a long time. Also, fixed a buffer bug where it would pop the data before verification of succesfull write, replaced it with peek-write-pop instead, so now if the write files, data point is not lost. 
 Also added a remote SD card re-initialisation, in case it fails during the flight. The data keeps being written to the buffers while it happens, so nothing is lost. A new .csv file is created after rebooting, and all the data is dumped there. Never seen SD card failing while in flight in such a manner, but now we have it addressed. 
