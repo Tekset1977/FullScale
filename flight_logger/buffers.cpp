@@ -25,6 +25,22 @@ void icmBufPush(const IcmSample* s) {
 }
 
 // Pop — returns false when buffer is empty
+bool icmBufPeek(IcmSample* s) {
+    if (!assertNotNull(s, ERR_NULL_PTR)) { return false; }
+    if (g_icm_buf.count == 0U) { return false; }
+
+    *s = g_icm_buf.data[g_icm_buf.tail];
+    return true;
+}
+
+bool icmBufCommitPeek(void) {
+    if (g_icm_buf.count == 0U) { return false; }
+
+    g_icm_buf.tail = (uint8_t)((g_icm_buf.tail + 1U) % ICM_RING_SIZE);
+    g_icm_buf.count--;
+    return true;
+}
+
 bool icmBufPop(IcmSample* s) {
     if (!assertNotNull(s, ERR_SENSOR_RANGE)) { return false; }
     if (g_icm_buf.count == 0U) { return false; }
@@ -57,6 +73,22 @@ void mplBufPush(const MplSample* s) {
 }
 
 // Pop — returns false when buffer is empty
+bool mplBufPeek(MplSample* s) {
+    if (!assertNotNull(s, ERR_NULL_PTR)) { return false; }
+    if (g_mpl_buf.count == 0U) { return false; }
+
+    *s = g_mpl_buf.data[g_mpl_buf.tail];
+    return true;
+}
+
+bool mplBufCommitPeek(void) {
+    if (g_mpl_buf.count == 0U) { return false; }
+
+    g_mpl_buf.tail = (uint8_t)((g_mpl_buf.tail + 1U) % MPL_RING_SIZE);
+    g_mpl_buf.count--;
+    return true;
+}
+
 bool mplBufPop(MplSample* s) {
     if (!assertNotNull(s, ERR_SENSOR_RANGE)) { return false; }
     if (g_mpl_buf.count == 0U) { return false; }

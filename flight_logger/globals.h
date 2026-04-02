@@ -8,6 +8,7 @@ extern int            g_error_state;
 extern bool           g_icm_ok;
 extern bool           g_mpl_ok;
 extern bool           g_display_ok;
+extern bool           g_system_ready;
 extern float          g_alt_baseline_m;
 extern unsigned long  g_wake_time_ms;
 extern bool           g_landing_confirmed;

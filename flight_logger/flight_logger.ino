@@ -27,6 +27,9 @@ static void initGroundStage(void);
 
 
 void setup(void) {
+    g_system_ready = false;
+    g_stage = STAGE_INIT;
+
     Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
     Wire.setTimeOut(100);
     delay(500);
@@ -91,6 +94,7 @@ void setup(void) {
 
     if (!initLogFile())   { return; }
 
+    g_system_ready = true;
     g_stage = STAGE_FLIGHT;
 
     delay(100);
@@ -105,11 +109,15 @@ void loop(void) {
 #endif
 
     // Shared — runs every tick regardless of stage
+    if (!g_system_ready) {
+        delay(CFG_LOOP_DELAY_MS);
+        return;
+    }
+
     SensorData data;
     data.timestamp   = (unsigned long)millis();
     data.ax = data.ay = data.az = 0.0f;
     data.gx = data.gy = data.gz = 0.0f;
-    data.mx = data.my = data.mz = 0.0f;
     data.altitude    = 0.0f;
     data.temperature = 25.0f;
 
@@ -137,6 +145,7 @@ void loop(void) {
 
     // Stage dispatch
     switch (g_stage) {
+        case STAGE_INIT:   break;
         case STAGE_FLIGHT: flightLoop(&data); break;
         case STAGE_GROUND: groundLoop(&data); break;
         default:                              break;
@@ -184,8 +193,7 @@ static void flightLoop(SensorData* data) {
     IcmSample icm_s = {
         data->timestamp,
         data->ax, data->ay, data->az,
-        data->gx, data->gy, data->gz,
-        data->mx, data->my, data->mz
+        data->gx, data->gy, data->gz
     };
     icmBufPush(&icm_s);
 
@@ -212,8 +220,7 @@ static void groundLoop(SensorData* data) {
     IcmSample icm_s = {
         data->timestamp,
         data->ax, data->ay, data->az,
-        data->gx, data->gy, data->gz,
-        data->mx, data->my, data->mz
+        data->gx, data->gy, data->gz
     };
     icmBufPush(&icm_s);
 

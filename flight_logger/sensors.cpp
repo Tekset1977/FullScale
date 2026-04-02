@@ -125,9 +125,6 @@ bool readIMUSensors(SensorData* data) {
     data->gx = (float)raw_gx / 131.0f;
     data->gy = (float)raw_gy / 131.0f;
     data->gz = (float)raw_gz / 131.0f;
-    data->mx = 0.0f;
-    data->my = 0.0f;
-    data->mz = 0.0f;
 
     if (!assertRange(data->ax, ACCEL_MIN_MPS2, ACCEL_MAX_MPS2, ERR_SENSOR_RANGE)) { return false; }
     if (!assertRange(data->ay, ACCEL_MIN_MPS2, ACCEL_MAX_MPS2, ERR_SENSOR_RANGE)) { return false; }

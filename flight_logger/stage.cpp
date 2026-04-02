@@ -1,2 +1,2 @@
 #include "stage.h"
-FlightStage g_stage = STAGE_FLIGHT;
+FlightStage g_stage = STAGE_INIT;

@@ -135,7 +135,6 @@ struct SensorData {
     unsigned long timestamp;
     float ax, ay, az;
     float gx, gy, gz;
-    float mx, my, mz;
     float altitude;
     float temperature;
 };
@@ -144,7 +143,6 @@ struct IcmSample {
     unsigned long timestamp;
     float ax, ay, az;
     float gx, gy, gz;
-    float mx, my, mz;
 };
 
 struct MplSample {

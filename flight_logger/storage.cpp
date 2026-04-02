@@ -10,6 +10,18 @@ static SPIClass g_spi(VSPI);
 static File     g_logFile;
 static File     g_servoFile;
 static File     g_soilFile;   // FIX 4: added for soil log
+static const char* const IMU_LOG_HEADER =
+    "timestamp_ms,ax,ay,az,gx,gy,gz,alt_m,temp_C";
+static const char* const SERVO_LOG_HEADER = "timestamp_ms,altitude_m";
+static const char* const SOIL_LOG_HEADER =
+    "timestamp_ms,moisture,stemma_temp_c,ec_uScm,ph,n_mgkg,modbus,dataq";
+static const char* const IMU_LOG_PATH = "/imu_log.csv";
+static const char* const SERVO_LOG_PATH = "/servo_log.csv";
+static const char* const SOIL_LOG_PATH = "/soil_log.csv";
+static const char* const IMU_RECOVERY_FMT = "/imu_log_recover_%03u.csv";
+static char     s_active_log_path[32] = "/imu_log.csv";
+static uint8_t  s_consecutive_log_failures = 0U;
+static uint16_t s_recovery_log_index = 0U;
 
 // File-valid assertion — private to this module
 static bool assertFileValid(void) {
@@ -18,6 +30,118 @@ static bool assertFileValid(void) {
         return false;
     }
     return true;
+}
+
+static bool setActiveLogPath(const char* path) {
+    if (!assertNotNull(path, ERR_NULL_PTR)) { return false; }
+
+    int len = snprintf(s_active_log_path, sizeof(s_active_log_path), "%s", path);
+    if (len < 0 || len >= (int)sizeof(s_active_log_path)) {
+        g_error_state = ERR_FILE_OPEN;
+        return false;
+    }
+    return true;
+}
+
+static bool openCsvWithHeader(const char* path, const char* header, File* out_file) {
+    if (!assertNotNull(path, ERR_NULL_PTR))    { return false; }
+    if (!assertNotNull(header, ERR_NULL_PTR))  { return false; }
+    if (!assertNotNull(out_file, ERR_NULL_PTR)) { return false; }
+
+    *out_file = SD.open(path, FILE_WRITE);
+    if (!*out_file) { return false; }
+
+    size_t written = out_file->println(header);
+    if (written == 0U) {
+        out_file->close();
+        g_error_state = ERR_FILE_OPEN;
+        return false;
+    }
+
+    out_file->flush();
+    return true;
+}
+
+static bool openAppendFile(const char* path, File* out_file) {
+    if (!assertNotNull(path, ERR_NULL_PTR))    { return false; }
+    if (!assertNotNull(out_file, ERR_NULL_PTR)) { return false; }
+
+    *out_file = SD.open(path, FILE_APPEND);
+    return (bool)(*out_file);
+}
+
+static bool nextRecoveryLogPath(char* path_out, size_t path_out_size) {
+    if (!assertNotNull(path_out, ERR_NULL_PTR)) { return false; }
+    if (path_out_size == 0U) {
+        g_error_state = ERR_FILE_OPEN;
+        return false;
+    }
+
+    for (uint16_t idx = (uint16_t)(s_recovery_log_index + 1U); idx < 1000U; idx++) {
+        int len = snprintf(path_out, path_out_size, IMU_RECOVERY_FMT, idx);
+        if (len < 0 || len >= (int)path_out_size) {
+            g_error_state = ERR_FILE_OPEN;
+            return false;
+        }
+        if (!SD.exists(path_out)) {
+            s_recovery_log_index = idx;
+            return true;
+        }
+    }
+
+    g_error_state = ERR_FILE_OPEN;
+    return false;
+}
+
+static bool recoverPrimaryLogFile(void) {
+    char recovery_path[32];
+    bool had_soil_file = (bool)g_soilFile;
+
+    if (g_logFile)   { g_logFile.flush();   g_logFile.close();   }
+    if (g_servoFile) { g_servoFile.flush(); g_servoFile.close(); }
+    if (g_soilFile)  { g_soilFile.flush();  g_soilFile.close();  }
+
+    if (!initSD()) { return false; }
+    if (!nextRecoveryLogPath(recovery_path, sizeof(recovery_path))) { return false; }
+    if (!openCsvWithHeader(recovery_path, IMU_LOG_HEADER, &g_logFile)) { return false; }
+    if (!setActiveLogPath(recovery_path)) {
+        g_logFile.close();
+        return false;
+    }
+
+    g_servoFile = File();
+    (void)openAppendFile(SERVO_LOG_PATH, &g_servoFile);
+
+    if (had_soil_file) {
+        g_soilFile = File();
+        (void)openAppendFile(SOIL_LOG_PATH, &g_soilFile);
+    }
+
+    s_consecutive_log_failures = 0U;
+
+#ifdef DEBUG
+    Serial.printf("Logging recovered to %s\n", s_active_log_path);
+    if (!g_servoFile) { Serial.println("Servo file reopen FAIL after recovery"); }
+    if (had_soil_file && !g_soilFile) { Serial.println("Soil file reopen FAIL after recovery"); }
+#endif
+    return true;
+}
+
+static bool handleConsecutiveLogFailure(void) {
+    if (s_consecutive_log_failures < 255U) {
+        s_consecutive_log_failures++;
+    }
+
+#ifdef DEBUG
+    Serial.printf("Log write failure #%u\n", s_consecutive_log_failures);
+#endif
+
+    if (s_consecutive_log_failures < CFG_MAX_RETRIES) { return false; }
+
+#ifdef DEBUG
+    Serial.println("Attempting SD log recovery");
+#endif
+    return recoverPrimaryLogFile();
 }
 
 // =============================================================================
@@ -46,29 +170,27 @@ bool initSD(void) {
 // =============================================================================
 
 bool initLogFile(void) {
-    static const char* const HEADER =
-        "timestamp_ms,ax,ay,az,gx,gy,gz,mx,my,mz,alt_m,temp_C";
-
-    if (HEADER == NULL || HEADER[0] == '\0') {
+    if (IMU_LOG_HEADER == NULL || IMU_LOG_HEADER[0] == '\0') {
         g_error_state = ERR_FILE_OPEN;
         return false;
     }
+
+    s_consecutive_log_failures = 0U;
+    s_recovery_log_index = 0U;
+    if (!setActiveLogPath(IMU_LOG_PATH)) { return false; }
+
     for (int retry = 0; retry < CFG_MAX_RETRIES; retry++) {
-        g_logFile = SD.open("/imu_log.csv", FILE_WRITE);
-        if (!g_logFile) { delay(100); continue; }
+        if (!openCsvWithHeader(IMU_LOG_PATH, IMU_LOG_HEADER, &g_logFile)) {
+            delay(100);
+            continue;
+        }
 
-        size_t written = g_logFile.println(HEADER);
-        if (written == 0U) { g_logFile.close(); delay(100); continue; }
+        if (!openCsvWithHeader(SERVO_LOG_PATH, SERVO_LOG_HEADER, &g_servoFile)) {
+            g_logFile.close();
+            delay(100);
+            continue;
+        }
 
-        g_logFile.flush();
-
-        g_servoFile = SD.open("/servo_log.csv", FILE_WRITE);
-        if (!g_servoFile) { g_logFile.close(); delay(100); continue; }
-
-        written = g_servoFile.println("timestamp_ms,altitude_m");
-        if (written == 0U) { g_servoFile.close(); g_logFile.close(); delay(100); continue; }
-
-        g_servoFile.flush();
         return true;
     }
     g_error_state = ERR_FILE_OPEN;
@@ -77,17 +199,12 @@ bool initLogFile(void) {
 
 // FIX 4: initSoilLogFile — was declared in storage.h but never implemented
 bool initSoilLogFile(void) {
-    static const char* const HEADER =
-        "timestamp_ms,moisture,stemma_temp_c,ec_uScm,ph,n_mgkg,modbus,dataq";
-
     for (int retry = 0; retry < CFG_MAX_RETRIES; retry++) {
-        g_soilFile = SD.open("/soil_log.csv", FILE_WRITE);
-        if (!g_soilFile) { delay(100); continue; }
+        if (!openCsvWithHeader(SOIL_LOG_PATH, SOIL_LOG_HEADER, &g_soilFile)) {
+            delay(100);
+            continue;
+        }
 
-        size_t written = g_soilFile.println(HEADER);
-        if (written == 0U) { g_soilFile.close(); delay(100); continue; }
-
-        g_soilFile.flush();
         return true;
     }
     g_error_state = ERR_FILE_OPEN;
@@ -104,11 +221,10 @@ bool writeLogData(const SensorData* data) {
 
     char line[160];
     int len = snprintf(line, sizeof(line),
-        "%lu,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.2f,%.2f",
+        "%lu,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.2f,%.2f",
         data->timestamp,
         data->ax, data->ay, data->az,
         data->gx, data->gy, data->gz,
-        data->mx, data->my, data->mz,
         data->altitude, data->temperature);
 
     if (len < 0 || len >= (int)sizeof(line)) {
@@ -182,26 +298,41 @@ bool writeSoilData(const SoilSample* s) {
 // Drain both ring buffers and write paired rows to the SD log.
 // Stops when either buffer runs dry so the two streams stay in lock-step.
 void drainBufsToLog(void) {
-    if (!assertFileValid()) { return; }
-
     while (g_icm_buf.count > 0U && g_mpl_buf.count > 0U) {
+        if (!assertFileValid()) {
+            (void)handleConsecutiveLogFailure();
+            break;
+        }
+
         IcmSample icm;
         MplSample mpl;
-        if (!icmBufPop(&icm)) { break; }
-        if (!mplBufPop(&mpl)) { break; }
+        if (!icmBufPeek(&icm)) { break; }
+        if (!mplBufPeek(&mpl)) { break; }
 
         SensorData d;
         d.timestamp   = icm.timestamp;
         d.ax = icm.ax;  d.ay = icm.ay;  d.az = icm.az;
         d.gx = icm.gx;  d.gy = icm.gy;  d.gz = icm.gz;
-        d.mx = icm.mx;  d.my = icm.my;  d.mz = icm.mz;
         d.altitude    = mpl.altitude;
         d.temperature = mpl.temperature;
 
-        bool ok = writeLogData(&d);
+        if (!writeLogData(&d)) {
 #ifdef DEBUG
-        if (!ok) { Serial.println("drainBufsToLog: writeLogData failed"); }
+            Serial.println("drainBufsToLog: writeLogData failed");
 #endif
+            (void)handleConsecutiveLogFailure();
+            break;
+        }
+
+        s_consecutive_log_failures = 0U;
+        if (!icmBufCommitPeek()) {
+            g_error_state = ERR_WRITE_FAILED;
+            break;
+        }
+        if (!mplBufCommitPeek()) {
+            g_error_state = ERR_WRITE_FAILED;
+            break;
+        }
     }
 }
 
@@ -229,6 +360,8 @@ void storageCloseFiles(void) {
 }
 
 void storageReopenFiles(void) {
+    bool had_soil_file = (bool)g_soilFile;
+
     if (PIN_SD_CS == 0U) { return; }
     if (g_logFile)   { g_logFile.close();   }
     if (g_servoFile) { g_servoFile.close(); }
@@ -244,13 +377,13 @@ void storageReopenFiles(void) {
     Serial.println("SD re-init OK");
 #endif
 
-    g_logFile = SD.open("/imu_log.csv", FILE_APPEND);
+    g_logFile = SD.open(s_active_log_path, FILE_APPEND);
 #ifdef DEBUG
     if (!g_logFile) { Serial.println("Log file reopen FAIL"); }
     else            { Serial.println("Log file reopen OK");   }
 #endif
 
-    g_servoFile = SD.open("/servo_log.csv", FILE_APPEND);
+    g_servoFile = SD.open(SERVO_LOG_PATH, FILE_APPEND);
 #ifdef DEBUG
     if (!g_servoFile) { Serial.println("Servo file reopen FAIL"); }
     else              { Serial.println("Servo file reopen OK");   }
@@ -258,8 +391,8 @@ void storageReopenFiles(void) {
 
     // FIX 5: soil file reopen was missing
     // Only reopen if it was previously opened (i.e. ground stage has started)
-    if (g_soilFile) {
-        g_soilFile = SD.open("/soil_log.csv", FILE_APPEND);
+    if (had_soil_file) {
+        g_soilFile = SD.open(SOIL_LOG_PATH, FILE_APPEND);
 #ifdef DEBUG
         if (!g_soilFile) { Serial.println("Soil file reopen FAIL"); }
         else             { Serial.println("Soil file reopen OK");   }
